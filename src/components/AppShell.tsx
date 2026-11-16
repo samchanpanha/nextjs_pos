@@ -35,6 +35,10 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   LayoutGrid,
+  Truck,
+  Landmark,
+  RotateCcw,
+  ShieldCheck,
 } from 'lucide-react';
 import { usePos } from '../context/PosContext';
 import { getNavLabel, I18N } from '../data/i18n';
@@ -93,6 +97,7 @@ export function AppShell({ children }: AppShellProps) {
     syncOfflineBills,
     switchActiveStaff,
     activateTenantSubscription,
+    resetDemoData,
     toasts,
     dismissToast,
   } = usePos();
@@ -137,33 +142,33 @@ export function AppShell({ children }: AppShellProps) {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault();
         setPaletteOpen((prev) => !prev);
-      } else if (e.altKey && e.key === '1') {
+      } else if (!isAdminActor && e.altKey && e.key === '1') {
         e.preventDefault();
         setNavSection('sell');
-      } else if (e.altKey && e.key === '2') {
+      } else if (!isAdminActor && e.altKey && e.key === '2') {
         e.preventDefault();
         setNavSection('kds');
-      } else if (e.altKey && e.key === '3') {
+      } else if (!isAdminActor && e.altKey && e.key === '3') {
         e.preventDefault();
         setNavSection('todays_money');
-      } else if (e.altKey && e.key === '4') {
+      } else if (!isAdminActor && e.altKey && e.key === '4') {
         e.preventDefault();
         setNavSection('bills');
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [setNavSection]);
+  }, [isAdminActor, setNavSection]);
 
   const currentShift = state.shifts.find(
     (s) => s.branchId === activeBranch.id && s.status === 'open'
   );
-  const pendingQr = state.qrQueue.filter(
-    (q) => q.branchId === activeBranch.id && q.status === 'pending'
-  );
-  const lowIngredients = state.ingredients.filter(
-    (i) => i.branchId === activeBranch.id && i.onHand <= i.minLevel
-  );
+  const pendingQr = isAdminActor
+    ? []
+    : state.qrQueue.filter((q) => q.branchId === activeBranch.id && q.status === 'pending');
+  const lowIngredients = isAdminActor
+    ? []
+    : state.ingredients.filter((i) => i.branchId === activeBranch.id && i.onHand <= i.minLevel);
   const offlineBillsCount = state.orders.filter((o) => o.offlinePendingSync).length;
   const totalNotifications = pendingQr.length + lowIngredients.length;
 
@@ -187,10 +192,12 @@ export function AppShell({ children }: AppShellProps) {
     { id: 'shift_drawer', icon: Clock, group: 'operations' },
     { id: 'menu_prices', icon: BookOpen, group: 'catalog_crm' },
     { id: 'stock', icon: Package, group: 'catalog_crm' },
+    { id: 'purchase_orders', icon: Truck, group: 'catalog_crm' },
     { id: 'tables_areas', icon: Grid2x2, group: 'catalog_crm' },
     { id: 'promotion', icon: Tag, group: 'catalog_crm' },
     { id: 'reports', icon: BarChart3, group: 'finance_compliance' },
     { id: 'sales_book', icon: FileSpreadsheet, group: 'finance_compliance' },
+    { id: 'accounting', icon: Landmark, group: 'finance_compliance' },
     { id: 'audit_log', icon: History, group: 'finance_compliance' },
     { id: 'staff', icon: Users, group: 'saas_platform' },
     { id: 'chain', icon: Building2, group: 'saas_platform' },
@@ -366,11 +373,12 @@ export function AppShell({ children }: AppShellProps) {
               >
                 <div className="min-w-0">
                   <div className="text-xs font-bold text-slate-900 truncate max-w-[160px]">
-                    {activeBranch.name}
+                    {isAdminActor ? `${state.shopName} (Governance)` : activeBranch.name}
                   </div>
                   <div className="text-[10px] text-emerald-800 whitespace-nowrap">
-                    Branch {state.branches.findIndex((b) => b.id === activeBranch.id) + 1} of{' '}
-                    {state.branches.length} · {activeBranch.code} · {t.switchBranch}
+                    {isAdminActor
+                      ? `Tenant ${state.businessCode} · Switch Workspace`
+                      : `Branch ${state.branches.findIndex((b) => b.id === activeBranch.id) + 1} of ${state.branches.length} · ${activeBranch.code} · ${t.switchBranch}`}
                   </div>
                 </div>
                 <ChevronDown className="h-3.5 w-3.5 text-slate-500 shrink-0" />
@@ -378,34 +386,36 @@ export function AppShell({ children }: AppShellProps) {
 
               {branchMenuOpen && (
                 <div className="absolute left-0 top-full mt-1.5 z-40 w-72 rounded-xl border border-slate-200 bg-white shadow-lg p-2 space-y-2">
-                  <div>
-                    <div className="px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                      Branches · {state.shopName}
+                  {!isAdminActor && (
+                    <div>
+                      <div className="px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                        Branches · {state.shopName}
+                      </div>
+                      {state.branches.map((b) => (
+                        <button
+                          key={b.id}
+                          type="button"
+                          onClick={() => {
+                            switchBranch(b.id);
+                            setBranchMenuOpen(false);
+                          }}
+                          className={`w-full flex items-center justify-between rounded-lg px-2.5 py-1.5 text-left text-xs ${
+                            b.id === activeBranch.id
+                              ? 'bg-emerald-50 text-emerald-900 font-semibold'
+                              : 'text-slate-700 hover:bg-slate-50'
+                          }`}
+                        >
+                          <span>
+                            {b.name} ({b.code})
+                          </span>
+                          {b.id === activeBranch.id && <Check className="h-3.5 w-3.5" />}
+                        </button>
+                      ))}
                     </div>
-                    {state.branches.map((b) => (
-                      <button
-                        key={b.id}
-                        type="button"
-                        onClick={() => {
-                          switchBranch(b.id);
-                          setBranchMenuOpen(false);
-                        }}
-                        className={`w-full flex items-center justify-between rounded-lg px-2.5 py-1.5 text-left text-xs ${
-                          b.id === activeBranch.id
-                            ? 'bg-emerald-50 text-emerald-900 font-semibold'
-                            : 'text-slate-700 hover:bg-slate-50'
-                        }`}
-                      >
-                        <span>
-                          {b.name} ({b.code})
-                        </span>
-                        {b.id === activeBranch.id && <Check className="h-3.5 w-3.5" />}
-                      </button>
-                    ))}
-                  </div>
+                  )}
 
                   {isAdminActor ? (
-                    <div className="border-t border-slate-100 pt-1.5">
+                    <div className={isAdminActor ? '' : 'border-t border-slate-100 pt-1.5'}>
                       <div className="px-2 py-1 flex items-center justify-between text-[10px] font-bold uppercase tracking-wider text-slate-400">
                         <span>Admin Tenants ({tenants.length})</span>
                         <button
@@ -455,42 +465,68 @@ export function AppShell({ children }: AppShellProps) {
               )}
             </div>
 
-            <div className="hidden lg:flex items-center gap-3 text-xs tabular-nums pl-1">
-              <span className="font-semibold text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-2.5 py-1 whitespace-nowrap">
-                1$ = {activeBranch.exchangeRate.toLocaleString()} ៛
-              </span>
+            {isAdminActor ? (
+              <div className="hidden lg:flex items-center gap-2 text-xs pl-1">
+                <span className="inline-flex items-center gap-1.5 rounded-md bg-slate-900 px-2.5 py-1 font-bold text-emerald-300 whitespace-nowrap">
+                  <ShieldCheck className="h-3.5 w-3.5" />
+                  PLATFORM CONTROL PLANE · STORE DATA DISABLED
+                </span>
+                <span className="rounded-md border border-slate-200 bg-slate-50 px-2.5 py-1 font-semibold text-slate-700 whitespace-nowrap">
+                  Plan: {state.plan.toUpperCase()} ({state.planDaysLeft}d)
+                </span>
+              </div>
+            ) : (
+              <div className="hidden lg:flex items-center gap-2.5 text-xs tabular-nums pl-1">
+                {state.isDemoTenant && (
+                  <div className="inline-flex items-center gap-1.5 rounded-md border border-indigo-200 bg-indigo-50 px-2.5 py-1 font-bold text-indigo-900 whitespace-nowrap">
+                    <span>USER DEMO STORE</span>
+                    <button
+                      type="button"
+                      onClick={() => resetDemoData()}
+                      title="Reset Demo Store POS, PO & Accounting sandbox data"
+                      className="inline-flex items-center gap-0.5 rounded bg-indigo-800 px-1.5 py-0.5 text-[10px] font-semibold text-white hover:bg-indigo-900"
+                    >
+                      <RotateCcw className="h-2.5 w-2.5" /> Reset
+                    </button>
+                  </div>
+                )}
 
-              <button
-                type="button"
-                onClick={() => setNavSection('shift_drawer')}
-                className={`rounded-md px-2.5 py-1 font-medium whitespace-nowrap border ${
-                  currentShift
-                    ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
-                    : 'bg-red-50 border-red-200 text-red-700'
-                }`}
-              >
-                {currentShift
-                  ? `${t.shiftOpen} · ${new Date(currentShift.openedAt).toLocaleTimeString([], {
-                      hour: '2-digit',
-                      minute: '2-digit',
-                      hour12: false,
-                    })}`
-                  : t.shiftClosed}
-              </button>
+                <span className="font-semibold text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-2.5 py-1 whitespace-nowrap">
+                  1$ = {activeBranch.exchangeRate.toLocaleString()} ៛
+                </span>
 
-              <button
-                type="button"
-                onClick={() => setNavSection('plan_billing')}
-                className={`rounded-md px-2 py-1 font-semibold whitespace-nowrap border ${
-                  subscriptionActive
-                    ? 'border-emerald-200 bg-emerald-50 text-emerald-800 hover:bg-emerald-100'
-                    : 'border-amber-300 bg-amber-50 text-amber-900 hover:bg-amber-100'
-                }`}
-              >
-                {state.plan.toUpperCase()} ·{' '}
-                {subscriptionActive ? `${state.planDaysLeft}d left` : 'Subscription Required'}
-              </button>
-            </div>
+                <button
+                  type="button"
+                  onClick={() => setNavSection('shift_drawer')}
+                  className={`rounded-md px-2.5 py-1 font-medium whitespace-nowrap border ${
+                    currentShift
+                      ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                      : 'bg-red-50 border-red-200 text-red-700'
+                  }`}
+                >
+                  {currentShift
+                    ? `${t.shiftOpen} · ${new Date(currentShift.openedAt).toLocaleTimeString([], {
+                        hour: '2-digit',
+                        minute: '2-digit',
+                        hour12: false,
+                      })}`
+                    : t.shiftClosed}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setNavSection('plan_billing')}
+                  className={`rounded-md px-2 py-1 font-semibold whitespace-nowrap border ${
+                    subscriptionActive
+                      ? 'border-emerald-200 bg-emerald-50 text-emerald-800 hover:bg-emerald-100'
+                      : 'border-amber-300 bg-amber-50 text-amber-900 hover:bg-amber-100'
+                  }`}
+                >
+                  {state.plan.toUpperCase()} ·{' '}
+                  {subscriptionActive ? `${state.planDaysLeft}d left` : 'Subscription Required'}
+                </button>
+              </div>
+            )}
           </div>
 
           {/* Right Controls */}
@@ -569,16 +605,18 @@ export function AppShell({ children }: AppShellProps) {
               {clock}
             </span>
 
-            {/* Guest QR Preview Shortcut */}
-            <button
-              type="button"
-              onClick={() => setExternalMode('qr')}
-              title="Open Guest QR Menu (/qr)"
-              aria-label="Open Guest QR Menu"
-              className="hidden sm:inline-flex h-8 w-8 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
-            >
-              <QrCode className="h-4 w-4" />
-            </button>
+            {/* Guest QR Preview Shortcut (Store Users only) */}
+            {!isAdminActor && (
+              <button
+                type="button"
+                onClick={() => setExternalMode('qr')}
+                title="Open Guest QR Menu (/qr)"
+                aria-label="Open Guest QR Menu"
+                className="hidden sm:inline-flex h-8 w-8 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
+              >
+                <QrCode className="h-4 w-4" />
+              </button>
+            )}
 
             {/* Notifications */}
             <div className="relative">
@@ -675,16 +713,18 @@ export function AppShell({ children }: AppShellProps) {
               )}
             </div>
 
-            {/* Customer Display Launcher */}
-            <button
-              type="button"
-              onClick={() => setExternalMode('display')}
-              title="Open Customer Display (/display)"
-              aria-label="Open Customer Display"
-              className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
-            >
-              <Eye className="h-4 w-4" />
-            </button>
+            {/* Customer Display Launcher (Store Users only) */}
+            {!isAdminActor && (
+              <button
+                type="button"
+                onClick={() => setExternalMode('display')}
+                title="Open Customer Display (/display)"
+                aria-label="Open Customer Display"
+                className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
+              >
+                <Eye className="h-4 w-4" />
+              </button>
+            )}
 
             {/* Staff / Account Menu */}
             <div className="relative">

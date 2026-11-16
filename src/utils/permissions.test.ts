@@ -148,3 +148,17 @@ test('Kitchen default permissions land on kds first and restrict settings', () =
   assert.equal(canAccessNavSection(kitchenUser, 'settings'), false);
   assert.equal(getFirstAllowedNavSection(kitchenUser), 'kds');
 });
+
+test('Super Admin is strictly isolated to Platform System sections (store POS, PO & Accounting data disabled)', () => {
+  assert.equal(getFirstAllowedNavSection(adminUser), 'saas_hub');
+  assert.equal(canAccessNavSection(adminUser, 'saas_hub'), true);
+  assert.equal(canAccessNavSection(adminUser, 'chain'), true);
+  assert.equal(canAccessNavSection(adminUser, 'staff'), true);
+  assert.equal(canAccessNavSection(adminUser, 'settings'), true);
+  // Store operational & financial modules are disabled on Super Admin plane
+  assert.equal(canAccessNavSection(adminUser, 'sell'), false);
+  assert.equal(canAccessNavSection(adminUser, 'accounting'), false);
+  assert.equal(canAccessNavSection(adminUser, 'purchase_orders'), false);
+  assert.equal(canAccessNavSection(adminUser, 'reports'), false);
+  assert.equal(canAccessNavSection(adminUser, 'bills'), false);
+});

@@ -191,8 +191,15 @@ export function createApiRouter(repo: PosSqliteRepository): express.Router {
     res.json({ ok: true, settings: updated });
   });
 
-  router.get('/platform/sqlite-stats', (_req: Request, res: Response) => {
-    res.json({ ok: true, stats: repo.getSqliteEngineStats() });
+  router.get('/platform/sqlite-stats', (req: Request, res: Response) => {
+    const auth = extractAuth(req, repo);
+    const stats = repo.getSqliteEngineStats();
+    res.json({
+      ok: true,
+      stats: auth.isSuperAdmin
+        ? { ...stats, paidOrdersGmvUsd: 0 }
+        : stats,
+    });
   });
 
   // ---------------------------------------------------------------------------
@@ -221,7 +228,10 @@ export function createApiRouter(repo: PosSqliteRepository): express.Router {
       res.status(404).json({ ok: false, error: 'Tenant not found.' });
       return;
     }
-    res.json({ ok: true, tenant });
+    res.json({
+      ok: true,
+      tenant: auth.isSuperAdmin ? repo.redactTenantOperationalDataForAdmin(tenant) : tenant,
+    });
   });
 
   router.post('/tenants', (req: Request, res: Response) => {
@@ -307,7 +317,10 @@ export function createApiRouter(repo: PosSqliteRepository): express.Router {
         timestamp: new Date().toISOString(),
       });
 
-      res.json({ ok: true, tenant: saved });
+      res.json({
+        ok: true,
+        tenant: auth.isSuperAdmin ? repo.redactTenantOperationalDataForAdmin(saved) : saved,
+      });
     } catch (err) {
       res.status(400).json({
         ok: false,

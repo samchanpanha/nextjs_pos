@@ -14,7 +14,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { usePos } from '../context/PosContext';
 import { getNavLabel } from '../data/i18n';
 import { isModuleEnabledForTenant, SAAS_MODULE_REGISTRY } from '../modules/registry';
-import { canAccessNavSection } from '../utils/permissions';
+import { canAccessNavSection, isPlatformOnlyAdmin } from '../utils/permissions';
 
 interface CommandPaletteProps {
   open: boolean;
@@ -85,94 +85,126 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
       });
     }
 
-    // 2. Quick Operational Actions
-    list.push({
-      id: 'act_takeaway',
-      category: 'Quick Actions',
-      title: 'New Take-away Order',
-      subtitle: 'Create an instant counter take-away ticket in POS',
-      badge: 'Action',
-      onSelect: () => {
-        createTakeAwayOrder('take_away');
-        setNavSection('sell');
-        onClose();
-        notify('Opened new Take-away order', 'success');
-      },
-    });
+    const isAdminOnly = isPlatformOnlyAdmin(activeStaff);
 
-    list.push({
-      id: 'act_kds_screen',
-      category: 'Quick Actions',
-      title: 'Open Dedicated Kitchen Screen (/kds)',
-      subtitle: 'Switch to full-screen KDS mode for kitchen or bar monitors',
-      badge: 'Screen',
-      onSelect: () => {
-        setExternalMode('kds');
-        onClose();
-      },
-    });
-
-    list.push({
-      id: 'act_qr_preview',
-      category: 'Quick Actions',
-      title: 'Preview Guest Self-Order QR Menu (/qr)',
-      subtitle: 'Test table QR ordering and guest service alerts',
-      badge: 'Screen',
-      onSelect: () => {
-        setExternalMode('qr');
-        onClose();
-      },
-    });
-
-    list.push({
-      id: 'act_simple_mode',
-      category: 'Quick Actions',
-      title: activeBranch.simpleMode
-        ? 'Disable Simple Counter Mode (Show All Modules)'
-        : 'Enable Simple Counter Mode (Streamlined Sidebar)',
-      subtitle: 'Toggle streamlined counter view for fast cashier shifts',
-      badge: 'UX',
-      onSelect: () => {
-        updateBranchSettings({ simpleMode: !activeBranch.simpleMode });
-        onClose();
-        notify(
-          !activeBranch.simpleMode ? 'Simple mode enabled' : 'Full SaaS sidebar restored',
-          'info'
-        );
-      },
-    });
-
-    // 3. Branches
-    for (const b of state.branches) {
-      if (b.id === activeBranch.id) continue;
+    if (!isAdminOnly) {
+      // 2. Quick Operational Actions (Store Users only)
       list.push({
-        id: `branch_${b.id}`,
-        category: 'Branches',
-        title: `Switch to Branch: ${b.name}`,
-        subtitle: `${b.code} · ${b.address}`,
-        badge: b.code,
+        id: 'act_takeaway',
+        category: 'Quick Actions',
+        title: 'New Take-away Order',
+        subtitle: 'Create an instant counter take-away ticket in POS',
+        badge: 'Action',
         onSelect: () => {
-          switchBranch(b.id);
-          onClose();
-          notify(`Switched active branch to ${b.name}`, 'info');
-        },
-      });
-    }
-
-    // 4. Menu Items (Jump to catalog or quick sell)
-    const branchMenu = state.menuItems.filter((m) => m.branchId === activeBranch.id && m.active);
-    for (const m of branchMenu.slice(0, 40)) {
-      list.push({
-        id: `item_${m.id}`,
-        category: 'Catalog',
-        title: `${m.nameEn} · $${m.priceUsd.toFixed(2)}`,
-        subtitle: `${m.nameKh} · ${m.category}`,
-        badge: m.station.toUpperCase(),
-        onSelect: () => {
+          createTakeAwayOrder('take_away');
           setNavSection('sell');
           onClose();
+          notify('Opened new Take-away order', 'success');
         },
       });
+
+      if (canAccessNavSection(activeStaff, 'purchase_orders', state.ownerPermissions)) {
+        list.push({
+          id: 'act_po_module',
+          category: 'Quick Actions',
+          title: 'Create Purchase Order / Receive Goods (GRN)',
+          subtitle: 'Manage supplier POs, low-stock auto-drafts & vendor AP bills',
+          badge: 'Procurement',
+          onSelect: () => {
+            setNavSection('purchase_orders');
+            onClose();
+          },
+        });
+      }
+
+      if (canAccessNavSection(activeStaff, 'accounting', state.ownerPermissions)) {
+        list.push({
+          id: 'act_accounting_module',
+          category: 'Quick Actions',
+          title: 'Open Financial Statements (P&L, Balance Sheet, GDT VAT)',
+          subtitle: 'Inspect double-entry General Ledger, Trial Balance & Prime Cost',
+          badge: 'Finance',
+          onSelect: () => {
+            setNavSection('accounting');
+            onClose();
+          },
+        });
+      }
+
+      list.push({
+        id: 'act_kds_screen',
+        category: 'Quick Actions',
+        title: 'Open Dedicated Kitchen Screen (/kds)',
+        subtitle: 'Switch to full-screen KDS mode for kitchen or bar monitors',
+        badge: 'Screen',
+        onSelect: () => {
+          setExternalMode('kds');
+          onClose();
+        },
+      });
+
+      list.push({
+        id: 'act_qr_preview',
+        category: 'Quick Actions',
+        title: 'Preview Guest Self-Order QR Menu (/qr)',
+        subtitle: 'Test table QR ordering and guest service alerts',
+        badge: 'Screen',
+        onSelect: () => {
+          setExternalMode('qr');
+          onClose();
+        },
+      });
+
+      list.push({
+        id: 'act_simple_mode',
+        category: 'Quick Actions',
+        title: activeBranch.simpleMode
+          ? 'Disable Simple Counter Mode (Show All Modules)'
+          : 'Enable Simple Counter Mode (Streamlined Sidebar)',
+        subtitle: 'Toggle streamlined counter view for fast cashier shifts',
+        badge: 'UX',
+        onSelect: () => {
+          updateBranchSettings({ simpleMode: !activeBranch.simpleMode });
+          onClose();
+          notify(
+            !activeBranch.simpleMode ? 'Simple mode enabled' : 'Full SaaS sidebar restored',
+            'info'
+          );
+        },
+      });
+
+      // 3. Branches
+      for (const b of state.branches) {
+        if (b.id === activeBranch.id) continue;
+        list.push({
+          id: `branch_${b.id}`,
+          category: 'Branches',
+          title: `Switch to Branch: ${b.name}`,
+          subtitle: `${b.code} · ${b.address}`,
+          badge: b.code,
+          onSelect: () => {
+            switchBranch(b.id);
+            onClose();
+            notify(`Switched active branch to ${b.name}`, 'info');
+          },
+        });
+      }
+
+      // 4. Menu Items (Jump to catalog or quick sell)
+      const branchMenu = state.menuItems.filter((m) => m.branchId === activeBranch.id && m.active);
+      for (const m of branchMenu.slice(0, 40)) {
+        list.push({
+          id: `item_${m.id}`,
+          category: 'Catalog',
+          title: `${m.nameEn} · $${m.priceUsd.toFixed(2)}`,
+          subtitle: `${m.nameKh} · ${m.category}`,
+          badge: m.station.toUpperCase(),
+          onSelect: () => {
+            setNavSection('sell');
+            onClose();
+          },
+        });
+      }
     }
 
     const q = query.trim().toLowerCase();

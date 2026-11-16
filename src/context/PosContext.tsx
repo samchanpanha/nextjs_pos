@@ -35,28 +35,53 @@ import type {
   BranchConfig,
   ExternalMode,
   Ingredient,
+  JournalEntry,
   LanguageCode,
+  LedgerAccount,
   LoyaltyMember,
   MenuItem,
   NavSection,
+  OperatingExpense,
   Order,
   OrderChannel,
   OrderLineItem,
+  PaymentMethod,
   PettyCashEntry,
   PlatformSettings,
   PosAppState,
   PosTable,
   PrepaidPackTemplate,
   Promotion,
+  PurchaseOrder,
+  PurchaseOrderLine,
+  PurchaseOrderPaymentRecord,
   QrIncomingOrder,
   Reservation,
   SaasUser,
   ShiftRecord,
   StaffMember,
+  Supplier,
+  SupplierPaymentTerms,
   TenantStatus,
   TenantSummary,
   VatInvoice,
 } from '../types/pos';
+import {
+  buildInventoryDirectJournal,
+  buildOperatingExpenseJournal,
+  buildPoGrnJournal,
+  buildPoPaymentJournal,
+  buildPosOrderSaleJournal,
+  buildPosRefundJournal,
+  buildPrepaidPackSaleJournal,
+  buildReversalJournal,
+  buildShiftCashJournal,
+  computeDueDateFromTerms,
+  computeLowStockAutoDraftPos,
+  createDefaultChartOfAccounts,
+  finalizeBalancedJournal,
+  resolveAccountName,
+} from '../utils/accountingEngine';
 import {
   calculateDrawerReconciliation,
   calculateOrderTotals,
@@ -67,6 +92,7 @@ type PosOrder = Order;
 type PromotionRule = Promotion;
 import {
   ALL_PERMISSIONS,
+  canAccessNavSection,
   canAssignRole,
   canEditSettings,
   canGrantPermission,
@@ -282,9 +308,94 @@ interface PosContextValue {
   syncOfflineBills: () => void;
   setDisplayOrder: (orderId: string | null, showKhqr: boolean) => void;
   resetDemoData: () => void;
+
+  // Purchase Orders & Suppliers (Procurement)
+  saveSupplier: (supplier: Omit<Supplier, 'id' | 'createdAt'> & { id?: string }) => void;
+  deleteSupplier: (supplierId: string) => void;
+  createPurchaseOrder: (params: {
+    supplierId: string;
+    orderDate: string;
+    expectedDate: string;
+    paymentTerms: SupplierPaymentTerms;
+    applyInputVat: boolean;
+    whtPercent?: number;
+    status?: 'draft' | 'sent';
+    note?: string;
+    lines: Omit<PurchaseOrderLine, 'id' | 'receivedQty' | 'lineTotalUsd'>[];
+  }) => PurchaseOrder | null;
+  autoDraftLowStockPurchaseOrders: () => number;
+  updatePurchaseOrderStatus: (poId: string, status: 'sent' | 'cancelled') => void;
+  receivePurchaseOrder: (params: {
+    poId: string;
+    supplierInvoiceRef?: string;
+    note?: string;
+    lines: { lineId: string; qtyReceivedNow: number; unitCostUsd: number }[];
+  }) => boolean;
+  payPurchaseOrder: (params: {
+    poId: string;
+    method: PaymentMethod;
+    grossSettledUsd: number;
+    whtPercent?: number;
+    paymentRef: string;
+    note?: string;
+  }) => boolean;
+
+  // Accounting & Double-Entry General Ledger
+  saveLedgerAccount: (
+    account: Omit<LedgerAccount, 'id' | 'systemAccount'> & { id?: string }
+  ) => void;
+  recordOperatingExpense: (params: {
+    date: string;
+    expenseAccountCode: string;
+    vendorName: string;
+    vendorVattin?: string;
+    description: string;
+    subtotalUsd: number;
+    applyInputVat: boolean;
+    whtPercent: number;
+    paymentStatus: 'paid' | 'payable';
+    paymentMethod?: PaymentMethod;
+    paymentRef?: string;
+  }) => OperatingExpense | null;
+  postManualJournalEntry: (params: {
+    date: string;
+    sourceRef?: string;
+    description: string;
+    lines: { accountCode: string; debitUsd: number; creditUsd: number; memo?: string }[];
+  }) => boolean;
+  reverseJournalEntry: (entryId: string, reason?: string) => boolean;
 }
 
 const PosContext = createContext<PosContextValue | null>(null);
+
+function redactClientStoreDataForAdmin(st: PosAppState): PosAppState {
+  return {
+    ...st,
+    storeDataRedactedForAdmin: true,
+    menuItems: [],
+    tables: [],
+    orders: [],
+    qrQueue: [],
+    shifts: [],
+    ingredients: [],
+    recipes: [],
+    stockHistory: [],
+    suppliers: [],
+    purchaseOrders: [],
+    accounts: [],
+    journalEntries: [],
+    expenses: [],
+    reservations: [],
+    promotions: [],
+    prepaidTemplates: [],
+    customerPacks: [],
+    members: [],
+    invoices: [],
+    groupSessions: [],
+    dailyRevenueHistory: [],
+    displayActiveOrderId: null,
+  };
+}
 
 function normalizeTenantRbac(st: PosAppState): PosAppState {
   const ownerPermissions = Array.isArray(st.ownerPermissions)
@@ -799,8 +910,12 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     if (!check.ok) {
       setIsEnteredPos(false);
       setExternalMode('pos');
+      return;
     }
-  }, [isEnteredPos, activeStaff, state, platformSettings]);
+    if (!canAccessNavSection(activeStaff, navSection, state.ownerPermissions)) {
+      setNavSection(getFirstAllowedNavSection(activeStaff, state.ownerPermissions));
+    }
+  }, [isEnteredPos, activeStaff, state, platformSettings, navSection]);
 
   const appendAudit = (
     prev: PosAppState,
@@ -891,13 +1006,20 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     }
 
     const targetTenant = normalizeTenantRbac(mergedMap[resolved.tenantId]);
-    const nextState = { ...targetTenant, activeStaffId: resolved.staff.id };
+    const baseState =
+      resolved.staff.role === 'admin'
+        ? redactClientStoreDataForAdmin(targetTenant)
+        : targetTenant;
+    const nextState = { ...baseState, activeStaffId: resolved.staff.id };
+    if (resolved.staff.role === 'admin') {
+      skipSqlitePushRef.current = true;
+    }
     setActiveTenantId(resolved.tenantId);
     setState(nextState);
     setShopId(resolved.tenantId);
     setSelectedTableId(null);
     setActiveOrderId(null);
-    if (!hasPermission(resolved.staff, navSection, nextState.ownerPermissions)) {
+    if (!canAccessNavSection(resolved.staff, navSection, nextState.ownerPermissions)) {
       setNavSection(getFirstAllowedNavSection(resolved.staff, nextState.ownerPermissions));
     }
     setExternalMode('pos');
@@ -910,12 +1032,6 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     pinOrPassword: string,
     businessCode?: string
   ): Promise<{ ok: boolean; error?: string }> => {
-    const localResult = staffSignIn(username, pinOrPassword, businessCode);
-    if (localResult.ok) {
-      notify(`Signed in as ${username}`, 'success');
-      return localResult;
-    }
-
     try {
       const remote = await verifyStaffPinOnSqlite({
         businessCode,
@@ -928,7 +1044,12 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
         const staffId = remote.staffId || normalized.activeStaffId;
         const staffMember =
           normalized.staff.find((s) => s.id === staffId) || normalized.staff[0];
-        const nextState = { ...normalized, activeStaffId: staffMember.id };
+        const nextState = {
+          ...(staffMember.role === 'admin'
+            ? redactClientStoreDataForAdmin(normalized)
+            : normalized),
+          activeStaffId: staffMember.id,
+        };
         skipSqlitePushRef.current = true;
         setRawTenantStates((prev) => ({ ...prev, [tid]: nextState }));
         setActiveTenantId(tid);
@@ -936,19 +1057,26 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
         setShopId(tid);
         setSelectedTableId(null);
         setActiveOrderId(null);
-        if (!hasPermission(staffMember, navSection, nextState.ownerPermissions)) {
+        if (!canAccessNavSection(staffMember, navSection, nextState.ownerPermissions)) {
           setNavSection(getFirstAllowedNavSection(staffMember, nextState.ownerPermissions));
         }
         setExternalMode('pos');
         setIsEnteredPos(true);
-        notify(`Connected to ${nextState.shopName} via SQLite`, 'success');
+        notify(
+          staffMember.role === 'admin'
+            ? 'Signed in as SaaS Platform Super Admin (Store Data Disabled)'
+            : `Connected to ${nextState.shopName} via SQLite`,
+          'success'
+        );
         return { ok: true };
       }
-    } catch (err) {
-      return {
-        ok: false,
-        error: err instanceof Error ? err.message : localResult.error || 'Sign-in failed.',
-      };
+    } catch {
+      // Fallback to local state when offline
+    }
+
+    const localResult = staffSignIn(username, pinOrPassword, businessCode);
+    if (localResult.ok) {
+      notify(`Signed in as ${username}`, 'success');
     }
     return localResult;
   };
@@ -1861,6 +1989,37 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
         };
       });
 
+      // Automated Double-Entry General Ledger posting (Sales + Output VAT + Recipe COGS)
+      const coa =
+        prev.accounts && prev.accounts.length > 0
+          ? prev.accounts
+          : createDefaultChartOfAccounts();
+      const jeSeq = prev.nextJournalSeq || (prev.journalEntries?.length || 0) + 1;
+      const orderWithTax: PosOrder = {
+        ...updatedOrder,
+        vatUsd: vatAmt,
+      };
+      let nextJournalEntries = prev.journalEntries || [];
+      let nextJournalSeq = jeSeq;
+      try {
+        const saleJe = buildPosOrderSaleJournal({
+          entryNo: `JE-2026-${String(jeSeq).padStart(4, '0')}`,
+          order: orderWithTax,
+          accounts: coa,
+          recipes: prev.recipes,
+          ingredients: prev.ingredients,
+          exchangeRate: branch.exchangeRate,
+          postedBy: activeStaff.name,
+          date: nowIso.slice(0, 10),
+        });
+        if (saleJe) {
+          nextJournalEntries = [saleJe, ...nextJournalEntries];
+          nextJournalSeq = jeSeq + 1;
+        }
+      } catch {
+        // Keep POS settlement non-blocking
+      }
+
       return {
         ...prev,
         orders: prev.orders.map((o) => (o.id === orderId ? updatedOrder : o)),
@@ -1871,6 +2030,9 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
         members,
         invoices: [newInv, ...prev.invoices],
         nextInvoiceSeq: prev.nextInvoiceSeq + 1,
+        accounts: coa,
+        journalEntries: nextJournalEntries,
+        nextJournalSeq,
         dailyRevenueHistory,
         shifts,
         displayActiveOrderId: null,
@@ -2284,7 +2446,36 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
           pettyCash: [fullEntry, ...s.pettyCash],
         };
       });
-      return { ...prev, shifts };
+      const branch = prev.branches.find((b) => b.id === prev.activeBranchId) || prev.branches[0];
+      const coa =
+        prev.accounts && prev.accounts.length > 0
+          ? prev.accounts
+          : createDefaultChartOfAccounts();
+      const jeSeq = prev.nextJournalSeq || (prev.journalEntries?.length || 0) + 1;
+      const amtInUsd =
+        entry.currency === 'USD'
+          ? entry.amount
+          : roundCurrency(entry.amount / Math.max(1000, branch?.exchangeRate || 4100));
+      const cashJe = buildShiftCashJournal({
+        entryNo: `JE-2026-${String(jeSeq).padStart(4, '0')}`,
+        branchId: prev.activeBranchId,
+        kind: entry.type === 'in' ? 'cash_in' : 'cash_out',
+        amountUsd: amtInUsd,
+        reason: entry.note || 'Petty cash adjustment',
+        accounts: coa,
+        exchangeRate: branch?.exchangeRate || 4100,
+        postedBy: activeStaff.name,
+      });
+
+      return {
+        ...prev,
+        shifts,
+        accounts: coa,
+        journalEntries: cashJe
+          ? [cashJe, ...(prev.journalEntries || [])]
+          : (prev.journalEntries || []),
+        nextJournalSeq: cashJe ? jeSeq + 1 : jeSeq,
+      };
     });
   };
 
@@ -2321,10 +2512,30 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
         `Counted $${countedUsd.toFixed(2)} & ${countedKhr.toLocaleString()} ៛ (variance $${varianceUsd.toFixed(2)} / ${varianceKhr.toLocaleString()} ៛)`,
         Math.abs(varianceTotalInUsd) > 0.01 ? 'warning' : 'info'
       );
+      const coa =
+        prev.accounts && prev.accounts.length > 0
+          ? prev.accounts
+          : createDefaultChartOfAccounts();
+      const jeSeq = prev.nextJournalSeq || (prev.journalEntries?.length || 0) + 1;
+      const varJe = buildShiftCashJournal({
+        entryNo: `JE-2026-${String(jeSeq).padStart(4, '0')}`,
+        branchId: prev.activeBranchId,
+        kind: 'variance',
+        amountUsd: varianceTotalInUsd,
+        reason: `Shift #${current.id.slice(-4)} reconciliation`,
+        accounts: coa,
+        exchangeRate: activeBranch.exchangeRate,
+        postedBy: activeStaff.name,
+      });
       return {
         ...prev,
         shifts: prev.shifts.map((s) => (s.id === current.id ? closed : s)),
         auditLogs: [log, ...prev.auditLogs],
+        accounts: coa,
+        journalEntries: varJe
+          ? [varJe, ...(prev.journalEntries || [])]
+          : (prev.journalEntries || []),
+        nextJournalSeq: varJe ? jeSeq + 1 : jeSeq,
       };
     });
     notify('Shift closed & Z-report logged to SQLite.', 'success');
@@ -2349,9 +2560,30 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
       const nextOnHand = ing.onHand + qtyAdded;
       const nextAvgCost = (oldValue + totalCostUsd) / nextOnHand;
       const updated = { ...ing, onHand: nextOnHand, avgCostUsd: Number(nextAvgCost.toFixed(5)) };
+      const branch = prev.branches.find((b) => b.id === prev.activeBranchId) || prev.branches[0];
+      const coa =
+        prev.accounts && prev.accounts.length > 0
+          ? prev.accounts
+          : createDefaultChartOfAccounts();
+      const jeSeq = prev.nextJournalSeq || (prev.journalEntries?.length || 0) + 1;
+      const invJe = buildInventoryDirectJournal({
+        entryNo: `JE-2026-${String(jeSeq).padStart(4, '0')}`,
+        branchId: ing.branchId,
+        mode: 'purchase',
+        ingredientName: ing.nameEn,
+        amountUsd: totalCostUsd,
+        accounts: coa,
+        exchangeRate: branch?.exchangeRate || 4100,
+        postedBy: activeStaff.name,
+      });
       return {
         ...prev,
         ingredients: prev.ingredients.map((i) => (i.id === ingredientId ? updated : i)),
+        accounts: coa,
+        journalEntries: invJe
+          ? [invJe, ...(prev.journalEntries || [])]
+          : (prev.journalEntries || []),
+        nextJournalSeq: invJe ? jeSeq + 1 : jeSeq,
         stockHistory: [
           {
             id: `sh_${Date.now()}`,
@@ -2374,9 +2606,32 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
       const ing = prev.ingredients.find((i) => i.id === ingredientId);
       if (!ing || qtyWasted <= 0) return prev;
       const updated = { ...ing, onHand: Math.max(0, ing.onHand - qtyWasted) };
+      const wasteValueUsd = roundCurrency(qtyWasted * ing.avgCostUsd);
+      const branch = prev.branches.find((b) => b.id === prev.activeBranchId) || prev.branches[0];
+      const coa =
+        prev.accounts && prev.accounts.length > 0
+          ? prev.accounts
+          : createDefaultChartOfAccounts();
+      const jeSeq = prev.nextJournalSeq || (prev.journalEntries?.length || 0) + 1;
+      const wasteJe = buildInventoryDirectJournal({
+        entryNo: `JE-2026-${String(jeSeq).padStart(4, '0')}`,
+        branchId: ing.branchId,
+        mode: 'waste',
+        ingredientName: ing.nameEn,
+        amountUsd: wasteValueUsd,
+        reason: note || 'Kitchen waste',
+        accounts: coa,
+        exchangeRate: branch?.exchangeRate || 4100,
+        postedBy: activeStaff.name,
+      });
       return {
         ...prev,
         ingredients: prev.ingredients.map((i) => (i.id === ingredientId ? updated : i)),
+        accounts: coa,
+        journalEntries: wasteJe
+          ? [wasteJe, ...(prev.journalEntries || [])]
+          : (prev.journalEntries || []),
+        nextJournalSeq: wasteJe ? jeSeq + 1 : jeSeq,
         stockHistory: [
           {
             id: `sh_${Date.now()}`,
@@ -2605,25 +2860,47 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     if (!tpl) return;
     const expiry = new Date(Date.now() + tpl.validDays * 86400000).toISOString().slice(0, 10);
     const code = Math.random().toString(36).substring(2, 10).toUpperCase();
-    setState((prev) => ({
-      ...prev,
-      customerPacks: [
-        {
-          id: `cpack_${Date.now()}`,
-          templateId,
-          packName: tpl.name,
-          customerName,
-          phone: phone.replace(/\s+/g, ''),
-          code,
-          usesLeft: tpl.totalUses,
-          totalUses: tpl.totalUses,
-          validUntil: expiry,
-          branchName: activeBranch.name,
-          active: true,
-        },
-        ...prev.customerPacks,
-      ],
-    }));
+    setState((prev) => {
+      const coa =
+        prev.accounts && prev.accounts.length > 0
+          ? prev.accounts
+          : createDefaultChartOfAccounts();
+      const jeSeq = prev.nextJournalSeq || (prev.journalEntries?.length || 0) + 1;
+      const packJe = buildPrepaidPackSaleJournal({
+        entryNo: `JE-2026-${String(jeSeq).padStart(4, '0')}`,
+        branchId: prev.activeBranchId,
+        packCode: code,
+        customerName,
+        priceUsd: tpl.priceUsd,
+        accounts: coa,
+        exchangeRate: activeBranch.exchangeRate,
+        postedBy: activeStaff.name,
+      });
+      return {
+        ...prev,
+        accounts: coa,
+        journalEntries: packJe
+          ? [packJe, ...(prev.journalEntries || [])]
+          : (prev.journalEntries || []),
+        nextJournalSeq: packJe ? jeSeq + 1 : jeSeq,
+        customerPacks: [
+          {
+            id: `cpack_${Date.now()}`,
+            templateId,
+            packName: tpl.name,
+            customerName,
+            phone: phone.replace(/\s+/g, ''),
+            code,
+            usesLeft: tpl.totalUses,
+            totalUses: tpl.totalUses,
+            validUntil: expiry,
+            branchName: activeBranch.name,
+            active: true,
+          },
+          ...prev.customerPacks,
+        ],
+      };
+    });
   };
 
   const voidCustomerPack = (packId: string) => {
@@ -2921,7 +3198,7 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     });
     if (!authCheck.ok) return false;
     setState((prev) => ({ ...prev, activeStaffId: staffId }));
-    if (!hasPermission(target, navSection, state.ownerPermissions)) {
+    if (!canAccessNavSection(target, navSection, state.ownerPermissions)) {
       setNavSection(getFirstAllowedNavSection(target, state.ownerPermissions));
     }
     return true;
@@ -2969,11 +3246,32 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
         replacesInvoiceNo: orig.invoiceNo,
       };
       const log = appendAudit(prev, 'Credit note issued', `Credit note for ${orig.invoiceNo}`, 'warning');
+      const coa =
+        prev.accounts && prev.accounts.length > 0
+          ? prev.accounts
+          : createDefaultChartOfAccounts();
+      const jeSeq = prev.nextJournalSeq || (prev.journalEntries?.length || 0) + 1;
+      const refundJe = buildPosRefundJournal({
+        entryNo: `JE-2026-${String(jeSeq).padStart(4, '0')}`,
+        branchId: orig.branchId,
+        invoiceNo: cn.invoiceNo,
+        exclVatUsd: orig.exclVatUsd,
+        vatUsd: orig.vatUsd,
+        totalUsd: orig.totalUsd,
+        accounts: coa,
+        exchangeRate: branch?.exchangeRate || 4100,
+        postedBy: activeStaff.name,
+      });
       return {
         ...prev,
         nextInvoiceSeq: prev.nextInvoiceSeq + 1,
         invoices: [cn, ...prev.invoices],
         auditLogs: [log, ...prev.auditLogs],
+        accounts: coa,
+        journalEntries: refundJe
+          ? [refundJe, ...(prev.journalEntries || [])]
+          : (prev.journalEntries || []),
+        nextJournalSeq: refundJe ? jeSeq + 1 : jeSeq,
       };
     });
   };
@@ -3108,14 +3406,705 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
 
   const resetDemoData = () => {
     if (!canStartDemoMode(platformSettings)) return;
-    if (!isSuperAdmin(activeStaff) && !state.isDemoTenant) return;
+    if (isSuperAdmin(activeStaff)) {
+      notify('Store operational data is disabled on Super Admin accounts.', 'warning');
+      return;
+    }
+    if (!state.isDemoTenant) return;
     const fresh = createSeedState('restaurant');
-    const keepAdmin = activeStaff.role === 'admin';
-    const adminUser = fresh.staff.find((s) => s.role === 'admin');
-    setState(keepAdmin && adminUser ? { ...fresh, activeStaffId: adminUser.id } : fresh);
+    setState(fresh);
     setActiveTenantId(fresh.tenantId || 'tenant_lotus_bkk1');
     setSelectedTableId(null);
     setActiveOrderId(null);
+    notify('Demo Store sandbox reset to clean sample data!', 'success');
+  };
+
+  // -------------------------------------------------------------------------
+  // Procurement & Supplier Purchase Orders (PO) Actions
+  // -------------------------------------------------------------------------
+  const saveSupplier: PosContextValue['saveSupplier'] = (sup) => {
+    if (isSuperAdmin(activeStaff)) return;
+    setState((prev) => {
+      const existingList = prev.suppliers || [];
+      const id = sup.id || `sup_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`;
+      const exists = existingList.find((s) => s.id === id);
+      const record: Supplier = {
+        ...sup,
+        id,
+        branchId: sup.branchId || 'all',
+        name: sup.name.trim(),
+        createdAt: exists?.createdAt || new Date().toISOString(),
+      };
+      return {
+        ...prev,
+        suppliers: exists
+          ? existingList.map((s) => (s.id === id ? record : s))
+          : [record, ...existingList],
+      };
+    });
+    notify(`Saved supplier "${sup.name.trim()}".`, 'success');
+  };
+
+  const deleteSupplier = (supplierId: string) => {
+    if (isSuperAdmin(activeStaff)) return;
+    const hasOpenPo = (state.purchaseOrders || []).some(
+      (po) => po.supplierId === supplierId && po.balanceDueUsd > 0.01
+    );
+    if (hasOpenPo) {
+      notify('Cannot remove supplier with unpaid Accounts Payable balance.', 'warning');
+      return;
+    }
+    setState((prev) => ({
+      ...prev,
+      suppliers: (prev.suppliers || []).filter((s) => s.id !== supplierId),
+    }));
+  };
+
+  const createPurchaseOrder: PosContextValue['createPurchaseOrder'] = (params) => {
+    if (isSuperAdmin(activeStaff)) return null;
+    const sup = (state.suppliers || []).find((s) => s.id === params.supplierId);
+    if (!sup || params.lines.length === 0) return null;
+
+    const seq = state.nextPoSeq || (state.purchaseOrders?.length || 0) + 1;
+    const poNumber = `PO-2026-${String(seq).padStart(4, '0')}`;
+    const nowIso = new Date().toISOString();
+    const cleanLines: PurchaseOrderLine[] = params.lines.map((l, idx) => {
+      const lineTotalUsd = roundCurrency(Math.max(0.01, l.orderedQty) * Math.max(0, l.unitCostUsd));
+      return {
+        ...l,
+        id: `pol_${Date.now()}_${idx}_${Math.random().toString(36).slice(2, 5)}`,
+        receivedQty: 0,
+        lineTotalUsd,
+      };
+    });
+
+    const subtotalUsd = roundCurrency(cleanLines.reduce((s, l) => s + l.lineTotalUsd, 0));
+    const inputVatUsd = params.applyInputVat ? roundCurrency(subtotalUsd * 0.1) : 0;
+    const totalUsd = roundCurrency(subtotalUsd + inputVatUsd);
+    const totalKhr = usdToKhr(totalUsd, activeBranch.exchangeRate, activeBranch.rielRounding);
+    const dueDate = computeDueDateFromTerms(params.orderDate, params.paymentTerms);
+
+    const newPo: PurchaseOrder = {
+      id: `po_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      poNumber,
+      branchId: activeBranch.id,
+      supplierId: sup.id,
+      supplierName: sup.name,
+      supplierVattin: sup.vattin,
+      status: params.status || 'sent',
+      paymentStatus: 'unpaid',
+      orderDate: params.orderDate,
+      expectedDate: params.expectedDate || params.orderDate,
+      dueDate,
+      paymentTerms: params.paymentTerms,
+      applyInputVat: params.applyInputVat,
+      whtPercent: params.whtPercent || 0,
+      lines: cleanLines,
+      subtotalUsd,
+      inputVatUsd,
+      totalUsd,
+      totalKhr,
+      receivedSubtotalUsd: 0,
+      receivedVatUsd: 0,
+      receivedTotalUsd: 0,
+      paidUsd: 0,
+      whtWithheldUsd: 0,
+      balanceDueUsd: 0,
+      grnHistory: [],
+      payments: [],
+      note: params.note?.trim() || undefined,
+      createdBy: activeStaff.name,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    };
+
+    setState((prev) => {
+      const log = appendAudit(
+        prev,
+        'Purchase Order created',
+        `${poNumber} to ${sup.name} ($${totalUsd.toFixed(2)})`
+      );
+      return {
+        ...prev,
+        nextPoSeq: seq + 1,
+        purchaseOrders: [newPo, ...(prev.purchaseOrders || [])],
+        auditLogs: [log, ...prev.auditLogs],
+      };
+    });
+    notify(`Created ${poNumber} ($${totalUsd.toFixed(2)}) for ${sup.name}!`, 'success');
+    return newPo;
+  };
+
+  const autoDraftLowStockPurchaseOrders = (): number => {
+    if (isSuperAdmin(activeStaff)) return 0;
+    const proposals = computeLowStockAutoDraftPos({
+      branchId: activeBranch.id,
+      ingredients: state.ingredients,
+      suppliers: state.suppliers || [],
+      existingPos: state.purchaseOrders || [],
+    });
+    if (proposals.length === 0) {
+      notify('All low-stock ingredients are already covered or above minimum level!', 'info');
+      return 0;
+    }
+
+    const today = new Date().toISOString().slice(0, 10);
+    const tomorrow = new Date(Date.now() + 86_400_000).toISOString().slice(0, 10);
+    const nowIso = new Date().toISOString();
+
+    setState((prev) => {
+      let seq = prev.nextPoSeq || (prev.purchaseOrders?.length || 0) + 1;
+      const drafted: PurchaseOrder[] = proposals.map((prop) => {
+        const poNumber = `PO-2026-${String(seq++).padStart(4, '0')}`;
+        const applyVat = Boolean(prop.supplierVattin);
+        const inputVatUsd = applyVat ? roundCurrency(prop.subtotalUsd * 0.1) : 0;
+        const totalUsd = roundCurrency(prop.subtotalUsd + inputVatUsd);
+        return {
+          id: `po_auto_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+          poNumber,
+          branchId: activeBranch.id,
+          supplierId: prop.supplierId,
+          supplierName: prop.supplierName,
+          supplierVattin: prop.supplierVattin,
+          status: 'draft',
+          paymentStatus: 'unpaid',
+          orderDate: today,
+          expectedDate: tomorrow,
+          dueDate: computeDueDateFromTerms(today, prop.paymentTerms),
+          paymentTerms: prop.paymentTerms,
+          applyInputVat: applyVat,
+          whtPercent: 0,
+          lines: prop.lines,
+          subtotalUsd: prop.subtotalUsd,
+          inputVatUsd,
+          totalUsd,
+          totalKhr: usdToKhr(totalUsd, activeBranch.exchangeRate, activeBranch.rielRounding),
+          receivedSubtotalUsd: 0,
+          receivedVatUsd: 0,
+          receivedTotalUsd: 0,
+          paidUsd: 0,
+          whtWithheldUsd: 0,
+          balanceDueUsd: 0,
+          grnHistory: [],
+          payments: [],
+          note: 'Auto-drafted from low-stock alert threshold',
+          createdBy: activeStaff.name,
+          createdAt: nowIso,
+          updatedAt: nowIso,
+        };
+      });
+
+      const log = appendAudit(
+        prev,
+        'Auto-drafted Low-Stock POs',
+        `Generated ${drafted.length} draft PO(s) for low-stock ingredients`
+      );
+
+      return {
+        ...prev,
+        nextPoSeq: seq,
+        purchaseOrders: [...drafted, ...(prev.purchaseOrders || [])],
+        auditLogs: [log, ...prev.auditLogs],
+      };
+    });
+
+    notify(`Auto-drafted ${proposals.length} restock Purchase Order(s)!`, 'success');
+    return proposals.length;
+  };
+
+  const updatePurchaseOrderStatus: PosContextValue['updatePurchaseOrderStatus'] = (
+    poId,
+    status
+  ) => {
+    if (isSuperAdmin(activeStaff)) return;
+    setState((prev) => ({
+      ...prev,
+      purchaseOrders: (prev.purchaseOrders || []).map((po) => {
+        if (po.id !== poId) return po;
+        if (status === 'cancelled' && po.receivedTotalUsd > 0) {
+          return po;
+        }
+        return { ...po, status, updatedAt: new Date().toISOString() };
+      }),
+    }));
+    notify(`Purchase Order updated to ${status.toUpperCase()}.`, 'info');
+  };
+
+  const receivePurchaseOrder: PosContextValue['receivePurchaseOrder'] = (params) => {
+    if (isSuperAdmin(activeStaff)) return false;
+    const targetPo = (state.purchaseOrders || []).find((p) => p.id === params.poId);
+    if (!targetPo || targetPo.status === 'cancelled') return false;
+
+    const validReceipts = params.lines.filter((l) => l.qtyReceivedNow > 0);
+    if (validReceipts.length === 0) return false;
+
+    const nowIso = new Date().toISOString();
+
+    setState((prev) => {
+      const po = (prev.purchaseOrders || []).find((p) => p.id === params.poId);
+      if (!po) return prev;
+
+      const updatedLines = po.lines.map((line) => {
+        const rec = validReceipts.find((r) => r.lineId === line.id);
+        if (!rec) return line;
+        const nextReceived = roundCurrency(line.receivedQty + rec.qtyReceivedNow);
+        const effectiveCost = rec.unitCostUsd > 0 ? rec.unitCostUsd : line.unitCostUsd;
+        return {
+          ...line,
+          receivedQty: nextReceived,
+          unitCostUsd: effectiveCost,
+          lineTotalUsd: roundCurrency(line.orderedQty * effectiveCost),
+        };
+      });
+
+      const grnLines = validReceipts.map((r) => {
+        const origLine = po.lines.find((l) => l.id === r.lineId)!;
+        const unitCost = r.unitCostUsd > 0 ? r.unitCostUsd : origLine.unitCostUsd;
+        return {
+          lineId: r.lineId,
+          ingredientId: origLine.ingredientId,
+          itemName: origLine.itemName,
+          qtyReceivedNow: r.qtyReceivedNow,
+          unitCostUsd: unitCost,
+          lineSubtotalUsd: roundCurrency(r.qtyReceivedNow * unitCost),
+        };
+      });
+
+      const grnSubtotal = roundCurrency(
+        grnLines.reduce((s, l) => s + l.lineSubtotalUsd, 0)
+      );
+      const grnVat = po.applyInputVat ? roundCurrency(grnSubtotal * 0.1) : 0;
+      const grnTotal = roundCurrency(grnSubtotal + grnVat);
+      const grnNumber = `GRN-${String(po.grnHistory.length + 1).padStart(4, '0')}`;
+
+      // Update kitchen ingredients stock & weighted moving-average cost
+      const nextIngredients = prev.ingredients.map((ing) => ({ ...ing }));
+      const nextStockHistory = [...prev.stockHistory];
+
+      for (const gl of grnLines) {
+        if (!gl.ingredientId) continue;
+        const origLine = po.lines.find((l) => l.id === gl.lineId);
+        const conv = Math.max(1, origLine?.conversionFactor || 1);
+        const addedBaseUnits = roundCurrency(gl.qtyReceivedNow * conv);
+        const targetIng = nextIngredients.find((i) => i.id === gl.ingredientId);
+        if (targetIng && addedBaseUnits > 0) {
+          const oldVal = Math.max(0, targetIng.onHand) * targetIng.avgCostUsd;
+          const nextOnHand = roundCurrency(targetIng.onHand + addedBaseUnits);
+          const nextAvg =
+            nextOnHand > 0
+              ? Number(((oldVal + gl.lineSubtotalUsd) / nextOnHand).toFixed(5))
+              : targetIng.avgCostUsd;
+          targetIng.onHand = nextOnHand;
+          targetIng.avgCostUsd = nextAvg;
+          nextStockHistory.unshift({
+            id: `sh_grn_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
+            ingredientId: targetIng.id,
+            ingredientName: targetIng.nameEn,
+            type: 'purchase',
+            qtyDelta: addedBaseUnits,
+            costUsd: gl.lineSubtotalUsd,
+            note: `${po.poNumber} · ${grnNumber}`,
+            createdAt: nowIso,
+          });
+        }
+      }
+
+      const allFullyReceived = updatedLines.every(
+        (l) => l.receivedQty >= l.orderedQty - 0.0001
+      );
+      const nextStatus: PurchaseOrder['status'] = allFullyReceived ? 'received' : 'partial';
+      const nextRecSub = roundCurrency(po.receivedSubtotalUsd + grnSubtotal);
+      const nextRecVat = roundCurrency(po.receivedVatUsd + grnVat);
+      const nextRecTot = roundCurrency(po.receivedTotalUsd + grnTotal);
+      const nextBalanceDue = roundCurrency(
+        Math.max(0, nextRecTot - po.paidUsd - po.whtWithheldUsd)
+      );
+      const nextPayStatus: PurchaseOrder['paymentStatus'] =
+        nextBalanceDue <= 0.009
+          ? 'paid'
+          : po.paidUsd + po.whtWithheldUsd > 0
+            ? 'partial'
+            : 'unpaid';
+
+      const updatedPo: PurchaseOrder = {
+        ...po,
+        status: nextStatus,
+        paymentStatus: nextPayStatus,
+        lines: updatedLines,
+        receivedSubtotalUsd: nextRecSub,
+        receivedVatUsd: nextRecVat,
+        receivedTotalUsd: nextRecTot,
+        balanceDueUsd: nextBalanceDue,
+        grnHistory: [
+          {
+            id: `grn_${Date.now()}`,
+            grnNumber,
+            receivedAt: nowIso,
+            receivedBy: activeStaff.name,
+            supplierInvoiceRef: params.supplierInvoiceRef?.trim() || undefined,
+            note: params.note?.trim() || undefined,
+            lines: grnLines,
+            subtotalUsd: grnSubtotal,
+            inputVatUsd: grnVat,
+            totalUsd: grnTotal,
+          },
+          ...po.grnHistory,
+        ],
+        updatedAt: nowIso,
+      };
+
+      // Automated Double-Entry Journal: Debit Inventory + Input VAT / Credit Accounts Payable
+      const coa =
+        prev.accounts && prev.accounts.length > 0
+          ? prev.accounts
+          : createDefaultChartOfAccounts();
+      const jeSeq = prev.nextJournalSeq || (prev.journalEntries?.length || 0) + 1;
+      const grnJe = buildPoGrnJournal({
+        entryNo: `JE-2026-${String(jeSeq).padStart(4, '0')}`,
+        branchId: po.branchId,
+        poNumber: po.poNumber,
+        grnNumber,
+        supplierName: po.supplierName,
+        subtotalUsd: grnSubtotal,
+        inputVatUsd: grnVat,
+        totalUsd: grnTotal,
+        accounts: coa,
+        exchangeRate: activeBranch.exchangeRate,
+        postedBy: activeStaff.name,
+        date: nowIso.slice(0, 10),
+      });
+
+      const log = appendAudit(
+        prev,
+        'Goods Received (GRN)',
+        `${grnNumber} on ${po.poNumber} ($${grnTotal.toFixed(2)} posted to Inventory & AP)`
+      );
+
+      return {
+        ...prev,
+        ingredients: nextIngredients,
+        stockHistory: nextStockHistory.slice(0, 80),
+        purchaseOrders: (prev.purchaseOrders || []).map((p) =>
+          p.id === po.id ? updatedPo : p
+        ),
+        accounts: coa,
+        journalEntries: grnJe
+          ? [grnJe, ...(prev.journalEntries || [])]
+          : (prev.journalEntries || []),
+        nextJournalSeq: grnJe ? jeSeq + 1 : jeSeq,
+        auditLogs: [log, ...prev.auditLogs],
+      };
+    });
+
+    notify('Goods Receipt (GRN) recorded — stock, moving-avg cost & AP ledger updated!', 'success');
+    return true;
+  };
+
+  const payPurchaseOrder: PosContextValue['payPurchaseOrder'] = (params) => {
+    if (isSuperAdmin(activeStaff)) return false;
+    const targetPo = (state.purchaseOrders || []).find((p) => p.id === params.poId);
+    if (!targetPo || params.grossSettledUsd <= 0) return false;
+
+    const nowIso = new Date().toISOString();
+    const whtPct = Math.max(0, Math.min(30, params.whtPercent ?? targetPo.whtPercent ?? 0));
+    const grossSettled = roundCurrency(
+      Math.min(targetPo.balanceDueUsd, params.grossSettledUsd)
+    );
+    if (grossSettled <= 0) return false;
+
+    const whtDeductedUsd = roundCurrency((grossSettled * whtPct) / 100);
+    const cashPaidUsd = roundCurrency(grossSettled - whtDeductedUsd);
+    const cleanRef =
+      params.paymentRef.trim() || `${params.method.toUpperCase()}-${Date.now().toString().slice(-6)}`;
+
+    setState((prev) => {
+      const po = (prev.purchaseOrders || []).find((p) => p.id === params.poId);
+      if (!po) return prev;
+
+      const nextPaid = roundCurrency(po.paidUsd + cashPaidUsd);
+      const nextWht = roundCurrency(po.whtWithheldUsd + whtDeductedUsd);
+      const nextBalance = roundCurrency(
+        Math.max(0, po.receivedTotalUsd - nextPaid - nextWht)
+      );
+      const nextPayStatus: PurchaseOrder['paymentStatus'] =
+        nextBalance <= 0.009 ? 'paid' : 'partial';
+
+      const payRec: PurchaseOrderPaymentRecord = {
+        id: `popay_${Date.now()}`,
+        paidAt: nowIso,
+        paidBy: activeStaff.name,
+        method: params.method,
+        grossSettledUsd: grossSettled,
+        whtDeductedUsd,
+        cashPaidUsd,
+        paymentRef: cleanRef,
+        note: params.note?.trim() || undefined,
+      };
+
+      const updatedPo: PurchaseOrder = {
+        ...po,
+        paidUsd: nextPaid,
+        whtWithheldUsd: nextWht,
+        balanceDueUsd: nextBalance,
+        paymentStatus: nextPayStatus,
+        payments: [payRec, ...po.payments],
+        updatedAt: nowIso,
+      };
+
+      const coa =
+        prev.accounts && prev.accounts.length > 0
+          ? prev.accounts
+          : createDefaultChartOfAccounts();
+      const jeSeq = prev.nextJournalSeq || (prev.journalEntries?.length || 0) + 1;
+      const payJe = buildPoPaymentJournal({
+        entryNo: `JE-2026-${String(jeSeq).padStart(4, '0')}`,
+        branchId: po.branchId,
+        poNumber: po.poNumber,
+        supplierName: po.supplierName,
+        grossSettledUsd: grossSettled,
+        whtDeductedUsd,
+        cashPaidUsd,
+        method: params.method,
+        paymentRef: cleanRef,
+        accounts: coa,
+        exchangeRate: activeBranch.exchangeRate,
+        postedBy: activeStaff.name,
+        date: nowIso.slice(0, 10),
+      });
+
+      const log = appendAudit(
+        prev,
+        'Vendor AP Payment',
+        `Paid $${cashPaidUsd.toFixed(2)} to ${po.supplierName} (${po.poNumber})`
+      );
+
+      return {
+        ...prev,
+        purchaseOrders: (prev.purchaseOrders || []).map((p) =>
+          p.id === po.id ? updatedPo : p
+        ),
+        accounts: coa,
+        journalEntries: payJe
+          ? [payJe, ...(prev.journalEntries || [])]
+          : (prev.journalEntries || []),
+        nextJournalSeq: payJe ? jeSeq + 1 : jeSeq,
+        auditLogs: [log, ...prev.auditLogs],
+      };
+    });
+
+    notify(`Settled $${grossSettled.toFixed(2)} AP on ${targetPo.poNumber}!`, 'success');
+    return true;
+  };
+
+  // -------------------------------------------------------------------------
+  // Double-Entry Accounting & General Ledger Actions
+  // -------------------------------------------------------------------------
+  const saveLedgerAccount: PosContextValue['saveLedgerAccount'] = (acc) => {
+    if (isSuperAdmin(activeStaff)) return;
+    setState((prev) => {
+      const coa =
+        prev.accounts && prev.accounts.length > 0
+          ? prev.accounts
+          : createDefaultChartOfAccounts();
+      const cleanCode = acc.code.trim();
+      const existing = coa.find((a) => a.code === cleanCode || a.id === acc.id);
+      const record: LedgerAccount = {
+        ...acc,
+        id: existing?.id || `coa_${cleanCode}_${Date.now().toString(36)}`,
+        code: cleanCode,
+        systemAccount: existing?.systemAccount ?? false,
+      };
+      const nextAccounts = existing
+        ? coa.map((a) => (a.code === existing.code ? record : a))
+        : [...coa, record].sort((a, b) => a.code.localeCompare(b.code));
+      return { ...prev, accounts: nextAccounts };
+    });
+    notify(`Saved account ${acc.code} — ${acc.nameEn}.`, 'success');
+  };
+
+  const recordOperatingExpense: PosContextValue['recordOperatingExpense'] = (params) => {
+    if (isSuperAdmin(activeStaff)) return null;
+    if (params.subtotalUsd <= 0 || !params.vendorName.trim()) return null;
+
+    const coa =
+      state.accounts && state.accounts.length > 0
+        ? state.accounts
+        : createDefaultChartOfAccounts();
+    const accountName = resolveAccountName(coa, params.expenseAccountCode);
+    const subtotalUsd = roundCurrency(params.subtotalUsd);
+    const inputVatUsd = params.applyInputVat ? roundCurrency(subtotalUsd * 0.1) : 0;
+    const totalUsd = roundCurrency(subtotalUsd + inputVatUsd);
+    const whtPct = Math.max(0, Math.min(30, params.whtPercent || 0));
+    const whtAmountUsd = roundCurrency((subtotalUsd * whtPct) / 100);
+    const cashPaidUsd =
+      params.paymentStatus === 'paid'
+        ? roundCurrency(totalUsd - whtAmountUsd)
+        : 0;
+    const expSeq = (state.expenses?.length || 0) + 1;
+    const voucherNo = `EXP-${String(expSeq).padStart(4, '0')}`;
+    const nowIso = new Date().toISOString();
+
+    const expense: OperatingExpense = {
+      id: `exp_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
+      voucherNo,
+      branchId: activeBranch.id,
+      date: params.date,
+      expenseAccountCode: params.expenseAccountCode,
+      expenseAccountName: accountName,
+      vendorName: params.vendorName.trim(),
+      vendorVattin: params.vendorVattin?.trim() || undefined,
+      description: params.description.trim() || accountName,
+      subtotalUsd,
+      applyInputVat: params.applyInputVat,
+      inputVatUsd,
+      whtPercent: whtPct,
+      whtAmountUsd,
+      totalUsd,
+      cashPaidUsd,
+      paymentStatus: params.paymentStatus,
+      paymentMethod: params.paymentMethod || 'Cash',
+      paymentRef: params.paymentRef?.trim() || undefined,
+      createdBy: activeStaff.name,
+      createdAt: nowIso,
+    };
+
+    setState((prev) => {
+      const activeCoa =
+        prev.accounts && prev.accounts.length > 0
+          ? prev.accounts
+          : createDefaultChartOfAccounts();
+      const jeSeq = prev.nextJournalSeq || (prev.journalEntries?.length || 0) + 1;
+      const expJe = buildOperatingExpenseJournal({
+        entryNo: `JE-2026-${String(jeSeq).padStart(4, '0')}`,
+        expense,
+        accounts: activeCoa,
+        exchangeRate: activeBranch.exchangeRate,
+        postedBy: activeStaff.name,
+      });
+      const log = appendAudit(
+        prev,
+        'Expense voucher posted',
+        `${voucherNo}: ${accountName} ($${totalUsd.toFixed(2)})`
+      );
+      return {
+        ...prev,
+        accounts: activeCoa,
+        expenses: [expense, ...(prev.expenses || [])],
+        journalEntries: expJe
+          ? [expJe, ...(prev.journalEntries || [])]
+          : (prev.journalEntries || []),
+        nextJournalSeq: expJe ? jeSeq + 1 : jeSeq,
+        auditLogs: [log, ...prev.auditLogs],
+      };
+    });
+
+    notify(`Posted expense ${voucherNo} ($${totalUsd.toFixed(2)}) to General Ledger!`, 'success');
+    return expense;
+  };
+
+  const postManualJournalEntry: PosContextValue['postManualJournalEntry'] = (params) => {
+    if (isSuperAdmin(activeStaff)) return false;
+    const coa =
+      state.accounts && state.accounts.length > 0
+        ? state.accounts
+        : createDefaultChartOfAccounts();
+    const jeSeq = state.nextJournalSeq || (state.journalEntries?.length || 0) + 1;
+    const entryNo = `JE-2026-${String(jeSeq).padStart(4, '0')}`;
+
+    try {
+      const built = finalizeBalancedJournal({
+        entryNo,
+        branchId: activeBranch.id,
+        date: params.date,
+        sourceType: 'manual',
+        sourceRef: params.sourceRef?.trim() || 'MANUAL',
+        description: params.description.trim(),
+        rawLines: params.lines.map((l, idx) =>
+          l.debitUsd > 0 || l.creditUsd > 0
+            ? {
+                id: `jl_man_${Date.now()}_${idx}`,
+                accountCode: l.accountCode,
+                accountName: resolveAccountName(coa, l.accountCode),
+                debitUsd: roundCurrency(Math.max(0, l.debitUsd)),
+                creditUsd: roundCurrency(Math.max(0, l.creditUsd)),
+                memo: l.memo?.trim() || undefined,
+              }
+            : null
+        ),
+        exchangeRate: activeBranch.exchangeRate,
+        postedBy: activeStaff.name,
+      });
+      if (!built) {
+        notify('Manual journal requires at least 2 balanced lines.', 'warning');
+        return false;
+      }
+
+      setState((prev) => {
+        const log = appendAudit(
+          prev,
+          'Manual journal posted',
+          `${entryNo}: ${params.description.trim()} ($${built.totalDebitUsd.toFixed(2)})`
+        );
+        return {
+          ...prev,
+          accounts: coa,
+          journalEntries: [built, ...(prev.journalEntries || [])],
+          nextJournalSeq: jeSeq + 1,
+          auditLogs: [log, ...prev.auditLogs],
+        };
+      });
+      notify(`Posted balanced journal ${entryNo} ($${built.totalDebitUsd.toFixed(2)})!`, 'success');
+      return true;
+    } catch (err) {
+      notify(err instanceof Error ? err.message : 'Journal entry is not balanced.', 'error');
+      return false;
+    }
+  };
+
+  const reverseJournalEntry: PosContextValue['reverseJournalEntry'] = (entryId, reason) => {
+    if (isSuperAdmin(activeStaff)) return false;
+    const orig = (state.journalEntries || []).find((e) => e.id === entryId);
+    if (!orig || orig.reversed) {
+      notify('This journal entry has already been reversed.', 'warning');
+      return false;
+    }
+
+    const coa =
+      state.accounts && state.accounts.length > 0
+        ? state.accounts
+        : createDefaultChartOfAccounts();
+    const jeSeq = state.nextJournalSeq || (state.journalEntries?.length || 0) + 1;
+    const revJe = buildReversalJournal({
+      entryNo: `JE-2026-${String(jeSeq).padStart(4, '0')}`,
+      original: orig,
+      accounts: coa,
+      postedBy: activeStaff.name,
+      reason,
+    });
+    if (!revJe) return false;
+
+    setState((prev) => {
+      const log = appendAudit(
+        prev,
+        'Journal entry reversed',
+        `Reversed ${orig.entryNo} via ${revJe.entryNo}`,
+        'warning'
+      );
+      return {
+        ...prev,
+        accounts: coa,
+        journalEntries: [
+          revJe,
+          ...(prev.journalEntries || []).map((e) =>
+            e.id === entryId ? { ...e, reversed: true } : e
+          ),
+        ],
+        nextJournalSeq: jeSeq + 1,
+        auditLogs: [log, ...prev.auditLogs],
+      };
+    });
+    notify(`Reversed ${orig.entryNo} via ${revJe.entryNo}.`, 'info');
+    return true;
   };
 
   const value: PosContextValue = {
@@ -3233,6 +4222,17 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     syncOfflineBills,
     setDisplayOrder,
     resetDemoData,
+    saveSupplier,
+    deleteSupplier,
+    createPurchaseOrder,
+    autoDraftLowStockPurchaseOrders,
+    updatePurchaseOrderStatus,
+    receivePurchaseOrder,
+    payPurchaseOrder,
+    saveLedgerAccount,
+    recordOperatingExpense,
+    postManualJournalEntry,
+    reverseJournalEntry,
   };
 
   return <PosContext.Provider value={value}>{children}</PosContext.Provider>;

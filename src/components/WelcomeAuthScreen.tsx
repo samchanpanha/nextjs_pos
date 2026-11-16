@@ -184,23 +184,23 @@ export function WelcomeAuthScreen() {
               Sell faster. Run smoother shifts.
             </h1>
             <p className="mt-3 text-sm text-emerald-100/85 leading-relaxed">
-              Multi-tenant SaaS POS for cafés, restaurants &amp; retail in Cambodia. Self-hosted
-              SQLite ACID persistence, dual USD &amp; Riel billing, Bakong KHQR, live KDS, and
-              CamInvoice VAT book.
+              Multi-tenant SaaS POS, Procurement &amp; Accounting for cafés, restaurants &amp;
+              retail in Cambodia. Self-hosted SQLite ACID persistence, USD &amp; Riel billing,
+              Bakong KHQR, Purchase Orders (3-way GRN), and real-time Double-Entry Financial Statements.
             </p>
 
             <ul className="mt-6 space-y-2.5 text-sm text-emerald-50/90">
               <li className="flex items-center gap-2.5">
                 <span className="text-amber-300 font-mono text-xs">$ / ៛</span>
-                <span>USD &amp; Riel on the same bill with whole-dollar + Riel change</span>
+                <span>USD &amp; Riel POS, Purchase Orders, AP Bills &amp; GDT Input/Output VAT</span>
+              </li>
+              <li className="flex items-center gap-2.5">
+                <span className="text-amber-300 font-mono text-xs">GL</span>
+                <span>Real-time P&amp;L, Balance Sheet, Cash Flow, Trial Balance &amp; Prime Cost</span>
               </li>
               <li className="flex items-center gap-2.5">
                 <span className="text-amber-300 font-mono text-xs">SQL</span>
-                <span>Zero-latency SQLite WAL database + SSE real-time multi-screen sync</span>
-              </li>
-              <li className="flex items-center gap-2.5">
-                <span className="text-amber-300 font-mono text-xs">ខ្មែរ</span>
-                <span>ខ្មែរ · English · Tiếng Việt per device &amp; printable 80mm receipts</span>
+                <span>Strict Tenant Isolation · User Demo Sandbox · Platform-Only Super Admin</span>
               </li>
             </ul>
           </div>
@@ -456,18 +456,6 @@ export function WelcomeAuthScreen() {
                 <div className="flex flex-wrap items-center justify-between gap-1.5 pt-1 text-[11px] text-slate-500">
                   <span>1-click role fill:</span>
                   <div className="flex flex-wrap gap-1">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setBusinessCode('');
-                        setUsername('admin');
-                        setPassword('0000');
-                        setError('');
-                      }}
-                      className="rounded border border-slate-200 bg-slate-50 px-2 py-0.5 font-mono text-slate-800 hover:bg-slate-100"
-                    >
-                      Admin (0000)
-                    </button>
                     {!demoDisabled && (
                       <>
                         <button
@@ -478,9 +466,10 @@ export function WelcomeAuthScreen() {
                             setPassword('1111');
                             setError('');
                           }}
-                          className="rounded border border-slate-200 bg-slate-50 px-2 py-0.5 font-mono text-slate-800 hover:bg-slate-100"
+                          title="User Demo Store Sandbox — Full POS, PO & Accounting"
+                          className="rounded border border-emerald-300 bg-emerald-50 px-2 py-0.5 font-mono font-semibold text-emerald-950 hover:bg-emerald-100"
                         >
-                          Owner (1111)
+                          Demo Store Owner (1111)
                         </button>
                         <button
                           type="button"
@@ -492,7 +481,7 @@ export function WelcomeAuthScreen() {
                           }}
                           className="rounded border border-slate-200 bg-slate-50 px-2 py-0.5 font-mono text-slate-800 hover:bg-slate-100"
                         >
-                          Cashier (3333)
+                          Demo Cashier (3333)
                         </button>
                         <button
                           type="button"
@@ -504,10 +493,23 @@ export function WelcomeAuthScreen() {
                           }}
                           className="rounded border border-slate-200 bg-slate-50 px-2 py-0.5 font-mono text-slate-800 hover:bg-slate-100"
                         >
-                          Kitchen (5555)
+                          Demo Kitchen (5555)
                         </button>
                       </>
                     )}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setBusinessCode('');
+                        setUsername('admin');
+                        setPassword('0000');
+                        setError('');
+                      }}
+                      title="SaaS Platform Control Only — Store Data Disabled"
+                      className="rounded border border-slate-300 bg-slate-900 px-2 py-0.5 font-mono text-emerald-300 hover:bg-slate-800"
+                    >
+                      Platform Admin (0000 · SaaS Only)
+                    </button>
                   </div>
                 </div>
               </form>
@@ -630,7 +632,7 @@ export function WelcomeAuthScreen() {
 
                 <div className="flex flex-wrap items-center justify-between gap-1 pt-1 text-[11px] text-slate-500">
                   <span>Built-in SQLite accounts:</span>
-                  <div className="flex gap-1.5">
+                  <div className="flex flex-wrap gap-1.5">
                     <button
                       type="button"
                       onClick={() => {
@@ -638,9 +640,10 @@ export function WelcomeAuthScreen() {
                         setSaasPassword('lotus1234');
                         setSaasMode('login');
                       }}
-                      className="rounded border border-slate-200 bg-slate-50 px-2 py-0.5 font-mono text-slate-800 hover:bg-slate-100"
+                      title="User Demo Store Sandbox — Full POS, PO & Accounting"
+                      className="rounded border border-emerald-300 bg-emerald-50 px-2 py-0.5 font-mono font-semibold text-emerald-950 hover:bg-emerald-100"
                     >
-                      owner@lotuscafe.kh
+                      Demo Store: owner@lotuscafe.kh
                     </button>
                     <button
                       type="button"
@@ -649,9 +652,10 @@ export function WelcomeAuthScreen() {
                         setSaasPassword('admin1234');
                         setSaasMode('login');
                       }}
-                      className="rounded border border-slate-200 bg-slate-50 px-2 py-0.5 font-mono text-slate-800 hover:bg-slate-100"
+                      title="SaaS Platform Control Plane — Store Data Disabled"
+                      className="rounded border border-slate-300 bg-slate-900 px-2 py-0.5 font-mono text-emerald-300 hover:bg-slate-800"
                     >
-                      admin@xaiwork.kh
+                      SaaS Admin: admin@xaiwork.kh
                     </button>
                   </div>
                 </div>

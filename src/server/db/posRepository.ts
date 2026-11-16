@@ -7,14 +7,18 @@ import type {
   DailyRevenuePoint,
   GroupOrderSession,
   Ingredient,
+  JournalEntry,
+  LedgerAccount,
   LoyaltyMember,
   MenuItem,
+  OperatingExpense,
   Order,
   PlatformSettings,
   PosAppState,
   PosTable,
   PrepaidPackTemplate,
   Promotion,
+  PurchaseOrder,
   QrIncomingOrder,
   RecipeLine,
   Reservation,
@@ -23,8 +27,10 @@ import type {
   SqliteEngineStats,
   StaffMember,
   StockMovement,
+  Supplier,
   VatInvoice,
 } from '../../types/pos';
+import { createDefaultChartOfAccounts } from '../../utils/accountingEngine';
 import {
   ALL_PERMISSIONS,
   DEFAULT_OWNER_TENANT_PERMISSIONS,
@@ -136,6 +142,58 @@ export class PosSqliteRepository {
         },
         { bypassSecurityControls: true }
       );
+    } else {
+      const demoJournalCount =
+        (
+          this.db
+            .prepare('SELECT COUNT(*) as c FROM journal_entries WHERE tenant_id = ?')
+            .get('tenant_lotus_bkk1') as { c: number } | undefined
+        )?.c ?? 0;
+
+      if (demoJournalCount === 0) {
+        const currentDemo = this.loadTenantState('tenant_lotus_bkk1');
+        if (currentDemo) {
+          const demoSeed = createSeedState('restaurant');
+          const mergedOwnerPerms = Array.from(
+            new Set([
+              ...(currentDemo.ownerPermissions || []),
+              ...(demoSeed.ownerPermissions || []),
+            ])
+          );
+          this.saveTenantState(
+            {
+              ...currentDemo,
+              ownerPermissions: mergedOwnerPerms,
+              featureFlags: {
+                ...demoSeed.featureFlags,
+                ...(currentDemo.featureFlags || {}),
+                purchase_orders: true,
+                accounting: true,
+              },
+              suppliers:
+                currentDemo.suppliers && currentDemo.suppliers.length > 0
+                  ? currentDemo.suppliers
+                  : demoSeed.suppliers,
+              purchaseOrders:
+                currentDemo.purchaseOrders && currentDemo.purchaseOrders.length > 0
+                  ? currentDemo.purchaseOrders
+                  : demoSeed.purchaseOrders,
+              accounts:
+                currentDemo.accounts && currentDemo.accounts.length > 0
+                  ? currentDemo.accounts
+                  : demoSeed.accounts,
+              journalEntries: demoSeed.journalEntries,
+              expenses:
+                currentDemo.expenses && currentDemo.expenses.length > 0
+                  ? currentDemo.expenses
+                  : demoSeed.expenses,
+              nextPoSeq: currentDemo.nextPoSeq || demoSeed.nextPoSeq,
+              nextJournalSeq: currentDemo.nextJournalSeq || demoSeed.nextJournalSeq,
+            },
+            { bypassSecurityControls: true }
+          );
+        }
+      }
     }
   }
 
@@ -478,9 +536,48 @@ export class PosSqliteRepository {
     const states: PosAppState[] = [];
     for (const r of rows) {
       const hydrated = this.loadTenantState(r.id);
-      if (hydrated) states.push(hydrated);
+      if (hydrated) {
+        states.push(
+          auth.isSuperAdmin
+            ? this.redactTenantOperationalDataForAdmin(hydrated)
+            : hydrated
+        );
+      }
     }
     return states;
+  }
+
+  /**
+   * Strips store operational, inventory, PO, and financial records from Super Admin payloads
+   * so Super Admin manages SaaS system infrastructure & permissions ONLY.
+   */
+  redactTenantOperationalDataForAdmin(state: PosAppState): PosAppState {
+    return {
+      ...state,
+      storeDataRedactedForAdmin: true,
+      menuItems: [],
+      tables: [],
+      orders: [],
+      qrQueue: [],
+      shifts: [],
+      ingredients: [],
+      recipes: [],
+      stockHistory: [],
+      suppliers: [],
+      purchaseOrders: [],
+      accounts: [],
+      journalEntries: [],
+      expenses: [],
+      reservations: [],
+      promotions: [],
+      prepaidTemplates: [],
+      customerPacks: [],
+      members: [],
+      invoices: [],
+      groupSessions: [],
+      dailyRevenueHistory: [],
+      displayActiveOrderId: null,
+    };
   }
 
   findTenantByBusinessCode(businessCode: string): PosAppState | null {
@@ -512,14 +609,15 @@ export class PosSqliteRepository {
     const cleanPin = params.pin.trim();
     const platform = this.getPlatformSettings();
 
-    // Super Admin login works globally across any tenant
+    // Super Admin login works globally across any tenant (with operational store data disabled/redacted)
     if ((cleanUser === 'admin' || cleanUser === 'superadmin') && cleanPin === '0000') {
-      const targetTenant = cleanCode
+      const rawTenant = cleanCode
         ? this.findTenantByBusinessCode(cleanCode)
         : (this.listAccessibleTenants({ user: null, isSuperAdmin: true })[0] ?? null);
-      if (!targetTenant) {
+      if (!rawTenant) {
         return { ok: false, error: 'No workspace found.' };
       }
+      const targetTenant = this.redactTenantOperationalDataForAdmin(rawTenant);
       const adminStaff = targetTenant.staff.find((s) => s.role === 'admin') ?? targetTenant.staff[0];
       return {
         ok: true,
@@ -688,6 +786,45 @@ export class PosSqliteRepository {
         .all(tenantId) as { data_json: string }[]
     ).map((r) => parseJson<StockMovement>(r.data_json, {} as StockMovement));
 
+    const suppliers = (
+      this.db
+        .prepare('SELECT data_json FROM suppliers WHERE tenant_id = ? ORDER BY sort_order ASC')
+        .all(tenantId) as { data_json: string }[]
+    ).map((r) => parseJson<Supplier>(r.data_json, {} as Supplier));
+
+    const purchaseOrders = (
+      this.db
+        .prepare(
+          'SELECT data_json FROM purchase_orders WHERE tenant_id = ? ORDER BY sort_order ASC'
+        )
+        .all(tenantId) as { data_json: string }[]
+    ).map((r) => parseJson<PurchaseOrder>(r.data_json, {} as PurchaseOrder));
+
+    const rawAccounts = (
+      this.db
+        .prepare(
+          'SELECT data_json FROM chart_of_accounts WHERE tenant_id = ? ORDER BY sort_order ASC'
+        )
+        .all(tenantId) as { data_json: string }[]
+    ).map((r) => parseJson<LedgerAccount>(r.data_json, {} as LedgerAccount));
+    const accounts = rawAccounts.length > 0 ? rawAccounts : createDefaultChartOfAccounts();
+
+    const journalEntries = (
+      this.db
+        .prepare(
+          'SELECT data_json FROM journal_entries WHERE tenant_id = ? ORDER BY sort_order ASC'
+        )
+        .all(tenantId) as { data_json: string }[]
+    ).map((r) => parseJson<JournalEntry>(r.data_json, {} as JournalEntry));
+
+    const expenses = (
+      this.db
+        .prepare(
+          'SELECT data_json FROM operating_expenses WHERE tenant_id = ? ORDER BY sort_order ASC'
+        )
+        .all(tenantId) as { data_json: string }[]
+    ).map((r) => parseJson<OperatingExpense>(r.data_json, {} as OperatingExpense));
+
     const reservations = (
       this.db
         .prepare('SELECT data_json FROM reservations WHERE tenant_id = ? ORDER BY sort_order ASC')
@@ -786,6 +923,11 @@ export class PosSqliteRepository {
       ingredients,
       recipes,
       stockHistory,
+      suppliers,
+      purchaseOrders,
+      accounts,
+      journalEntries,
+      expenses,
       reservations,
       promotions,
       prepaidTemplates,
@@ -797,6 +939,8 @@ export class PosSqliteRepository {
       dailyRevenueHistory: parseJson<DailyRevenuePoint[]>(tenantRow.daily_revenue_json, []),
       nextOrderNumber: Number(tenantRow.next_order_number ?? 1),
       nextInvoiceSeq: Number(tenantRow.next_invoice_seq ?? 1),
+      nextPoSeq: Number(tenantRow.next_po_seq ?? 1),
+      nextJournalSeq: Number(tenantRow.next_journal_seq ?? 1),
       offlineMode: false,
       displayActiveOrderId: tenantRow.display_active_order_id
         ? String(tenantRow.display_active_order_id)
@@ -894,6 +1038,11 @@ export class PosSqliteRepository {
 
       const nextVersion = existingRow ? Number(existingRow.version ?? 1) + 1 : 1;
       const createdAt = existingRow ? String(existingRow.created_at) : nowIso;
+      const preserveOperationalStoreData = Boolean(
+        existingRow &&
+          !options?.bypassSecurityControls &&
+          (isSuperAdmin || incoming.storeDataRedactedForAdmin)
+      );
 
       this.db
         .prepare(
@@ -902,9 +1051,10 @@ export class PosSqliteRepository {
              tenant_status, plan, plan_days_left, subscription_status, subscription_expires_at,
              subscription_ref, subscription_paid_usd, referral_code, active_branch_id,
              active_staff_id, owner_permissions_json, next_order_number, next_invoice_seq,
+             next_po_seq, next_journal_seq,
              display_active_order_id, display_show_khqr, daily_revenue_json, version,
              created_at, updated_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(id) DO UPDATE SET
              owner_uid = excluded.owner_uid,
              shop_name = excluded.shop_name,
@@ -924,6 +1074,8 @@ export class PosSqliteRepository {
              owner_permissions_json = excluded.owner_permissions_json,
              next_order_number = excluded.next_order_number,
              next_invoice_seq = excluded.next_invoice_seq,
+             next_po_seq = excluded.next_po_seq,
+             next_journal_seq = excluded.next_journal_seq,
              display_active_order_id = excluded.display_active_order_id,
              display_show_khqr = excluded.display_show_khqr,
              daily_revenue_json = excluded.daily_revenue_json,
@@ -948,11 +1100,25 @@ export class PosSqliteRepository {
           incoming.activeBranchId,
           incoming.activeStaffId,
           effectiveOwnerPermsJson,
-          incoming.nextOrderNumber,
-          incoming.nextInvoiceSeq,
-          incoming.displayActiveOrderId ?? null,
+          preserveOperationalStoreData
+            ? Number(existingRow?.next_order_number ?? incoming.nextOrderNumber)
+            : incoming.nextOrderNumber,
+          preserveOperationalStoreData
+            ? Number(existingRow?.next_invoice_seq ?? incoming.nextInvoiceSeq)
+            : incoming.nextInvoiceSeq,
+          preserveOperationalStoreData
+            ? Number(existingRow?.next_po_seq ?? incoming.nextPoSeq ?? 1)
+            : (incoming.nextPoSeq ?? 1),
+          preserveOperationalStoreData
+            ? Number(existingRow?.next_journal_seq ?? incoming.nextJournalSeq ?? 1)
+            : (incoming.nextJournalSeq ?? 1),
+          preserveOperationalStoreData
+            ? (existingRow?.display_active_order_id ? String(existingRow.display_active_order_id) : null)
+            : (incoming.displayActiveOrderId ?? null),
           incoming.displayShowKhqr ? 1 : 0,
-          JSON.stringify(incoming.dailyRevenueHistory || []),
+          preserveOperationalStoreData
+            ? String(existingRow?.daily_revenue_json || '[]')
+            : JSON.stringify(incoming.dailyRevenueHistory || []),
           nextVersion,
           createdAt,
           nowIso
@@ -1023,6 +1189,7 @@ export class PosSqliteRepository {
         );
       });
 
+      if (!preserveOperationalStoreData) {
       // Menu items
       this.db.prepare('DELETE FROM menu_items WHERE tenant_id = ?').run(tenantId);
       const menuStmt = this.db.prepare(
@@ -1282,6 +1449,123 @@ export class PosSqliteRepository {
           JSON.stringify(inv)
         );
       });
+
+      // Suppliers
+      this.db.prepare('DELETE FROM suppliers WHERE tenant_id = ?').run(tenantId);
+      const supStmt = this.db.prepare(
+        `INSERT INTO suppliers (id, tenant_id, branch_id, sort_order, name, category, vattin, payment_terms, active, data_json, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      );
+      (incoming.suppliers || []).forEach((sup, idx) => {
+        supStmt.run(
+          sup.id,
+          tenantId,
+          sup.branchId || 'all',
+          idx,
+          sup.name,
+          sup.category,
+          sup.vattin ?? null,
+          sup.paymentTerms || 'cod',
+          sup.active ? 1 : 0,
+          JSON.stringify(sup),
+          nowIso
+        );
+      });
+
+      // Purchase Orders
+      this.db.prepare('DELETE FROM purchase_orders WHERE tenant_id = ?').run(tenantId);
+      const poStmt = this.db.prepare(
+        `INSERT INTO purchase_orders (id, tenant_id, branch_id, sort_order, po_number, supplier_id, status, payment_status, total_usd, balance_due_usd, order_date, due_date, data_json, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      );
+      (incoming.purchaseOrders || []).forEach((po, idx) => {
+        poStmt.run(
+          po.id,
+          tenantId,
+          po.branchId,
+          idx,
+          po.poNumber,
+          po.supplierId,
+          po.status,
+          po.paymentStatus || 'unpaid',
+          po.totalUsd,
+          po.balanceDueUsd,
+          po.orderDate,
+          po.dueDate || po.expectedDate || po.orderDate,
+          JSON.stringify(po),
+          nowIso
+        );
+      });
+
+      // Chart of Accounts
+      const effectiveAccounts =
+        incoming.accounts && incoming.accounts.length > 0
+          ? incoming.accounts
+          : createDefaultChartOfAccounts();
+      this.db.prepare('DELETE FROM chart_of_accounts WHERE tenant_id = ?').run(tenantId);
+      const coaStmt = this.db.prepare(
+        `INSERT INTO chart_of_accounts (id, tenant_id, sort_order, code, name_en, account_type, normal_balance, active, data_json, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      );
+      effectiveAccounts.forEach((acc, idx) => {
+        coaStmt.run(
+          acc.id,
+          tenantId,
+          idx,
+          acc.code,
+          acc.nameEn,
+          acc.type,
+          acc.normalBalance,
+          acc.active ? 1 : 0,
+          JSON.stringify(acc),
+          nowIso
+        );
+      });
+
+      // Double-Entry Journal Entries
+      this.db.prepare('DELETE FROM journal_entries WHERE tenant_id = ?').run(tenantId);
+      const jeStmt = this.db.prepare(
+        `INSERT INTO journal_entries (id, tenant_id, branch_id, sort_order, entry_no, entry_date, source_type, total_debit_usd, total_credit_usd, created_at, data_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      );
+      (incoming.journalEntries || []).forEach((je, idx) => {
+        jeStmt.run(
+          je.id,
+          tenantId,
+          je.branchId,
+          idx,
+          je.entryNo,
+          je.date,
+          je.sourceType,
+          je.totalDebitUsd,
+          je.totalCreditUsd,
+          je.createdAt,
+          JSON.stringify(je)
+        );
+      });
+
+      // Operating Expenses
+      this.db.prepare('DELETE FROM operating_expenses WHERE tenant_id = ?').run(tenantId);
+      const expStmt = this.db.prepare(
+        `INSERT INTO operating_expenses (id, tenant_id, branch_id, sort_order, voucher_no, expense_date, account_code, total_usd, payment_status, data_json, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      );
+      (incoming.expenses || []).forEach((exp, idx) => {
+        expStmt.run(
+          exp.id,
+          tenantId,
+          exp.branchId,
+          idx,
+          exp.voucherNo,
+          exp.date,
+          exp.expenseAccountCode,
+          exp.totalUsd,
+          exp.paymentStatus || 'paid',
+          JSON.stringify(exp),
+          nowIso
+        );
+      });
+      } // end if (!preserveOperationalStoreData)
 
       // Audit Logs — STRICTLY APPEND-ONLY (`INSERT OR IGNORE`) per security_spec.md §3.4!
       const auditStmt = this.db.prepare(

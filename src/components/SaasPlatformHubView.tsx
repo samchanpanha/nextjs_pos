@@ -22,12 +22,15 @@ import {
 } from '../lib/sqliteClient';
 import { OPTIONAL_FEATURE_TOGGLES, SAAS_MODULE_REGISTRY } from '../modules/registry';
 import type { PosAppState, SqliteEngineStats } from '../types/pos';
+import { canAccessNavSection, isSuperAdmin } from '../utils/permissions';
 
 export function SaasPlatformHubView() {
   const {
     state,
     activeBranch,
     activeStaff,
+    platformSettings,
+    setDemoUsersDisabled,
     sseConnected,
     cloudStatus,
     setNavSection,
@@ -35,6 +38,8 @@ export function SaasPlatformHubView() {
     reloadTenantsFromSqlite,
     notify,
   } = usePos();
+
+  const isAdminActor = isSuperAdmin(activeStaff);
 
   const [stats, setStats] = useState<SqliteEngineStats | null>(null);
   const [loading, setLoading] = useState(true);
@@ -142,28 +147,70 @@ export function SaasPlatformHubView() {
             <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
             Refresh Telemetry
           </button>
-          <button
-            type="button"
-            disabled={busyBackup}
-            onClick={() => void handleExportBackup()}
-            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-emerald-400 text-emerald-950 hover:bg-emerald-300 text-xs font-semibold transition disabled:opacity-60"
-          >
-            <Download size={14} />
-            Export SQLite Backup
-          </button>
-          <label className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-white/15 hover:bg-white/25 text-xs font-medium border border-white/20 cursor-pointer transition">
-            <Upload size={14} />
-            Restore JSON
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="application/json"
-              className="hidden"
-              onChange={(e) => void handleRestoreFile(e)}
-            />
-          </label>
+          {isAdminActor ? (
+            <button
+              type="button"
+              onClick={() => setDemoUsersDisabled(!platformSettings.demoUsersDisabled)}
+              className={`inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold transition ${
+                platformSettings.demoUsersDisabled
+                  ? 'bg-amber-400 text-slate-950 hover:bg-amber-300'
+                  : 'bg-emerald-400 text-emerald-950 hover:bg-emerald-300'
+              }`}
+            >
+              <ShieldCheck size={14} />
+              {platformSettings.demoUsersDisabled
+                ? 'Re-Enable User Demo Store'
+                : 'User Demo Store: Active'}
+            </button>
+          ) : (
+            <>
+              <button
+                type="button"
+                disabled={busyBackup}
+                onClick={() => void handleExportBackup()}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-emerald-400 text-emerald-950 hover:bg-emerald-300 text-xs font-semibold transition disabled:opacity-60"
+              >
+                <Download size={14} />
+                Export SQLite Backup
+              </button>
+              <label className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-white/15 hover:bg-white/25 text-xs font-medium border border-white/20 cursor-pointer transition">
+                <Upload size={14} />
+                Restore JSON
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="application/json"
+                  className="hidden"
+                  onChange={(e) => void handleRestoreFile(e)}
+                />
+              </label>
+            </>
+          )}
         </div>
       </div>
+
+      {isAdminActor && (
+        <div className="rounded-2xl border border-slate-300 bg-slate-900 p-4 text-xs text-slate-200 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-start gap-2.5">
+            <ShieldCheck className="h-5 w-5 text-emerald-400 shrink-0 mt-0.5" />
+            <div>
+              <div className="font-bold text-white">
+                Platform-Only Super Admin — Tenant Operational Store Data Disabled
+              </div>
+              <div className="text-slate-300 mt-0.5">
+                Super Admin manages SaaS tenants, plans, module feature flags, and role permissions only. Private store POS orders, inventory, Purchase Orders, and Accounting ledgers are masked. Sign in to the <strong>User Demo Store</strong> (<code className="text-emerald-300">owner@lotuscafe.kh</code> / <code className="text-emerald-300">guide_chu</code>) to manage &amp; test store features.
+              </div>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => setNavSection('chain')}
+            className="rounded-lg bg-emerald-500 px-3 py-1.5 font-bold text-slate-950 hover:bg-emerald-400 whitespace-nowrap"
+          >
+            Manage Tenants →
+          </button>
+        </div>
+      )}
 
       {/* Top KPI Cards */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3.5">
@@ -208,15 +255,20 @@ export function SaasPlatformHubView() {
 
         <div className="bg-white rounded-2xl border border-slate-200 p-4 shadow-2xs">
           <div className="flex items-center justify-between text-xs text-slate-500 mb-1">
-            <span>SQLite Settled GMV</span>
+            <span>{isAdminActor ? 'SaaS Billing Revenue' : 'SQLite Settled GMV'}</span>
             <Activity size={15} className="text-purple-600" />
           </div>
           <div className="text-lg font-bold text-slate-900">
-            ${(stats?.paidOrdersGmvUsd ?? 0).toFixed(2)}
+            $
+            {(isAdminActor
+              ? stats?.subscriptionRevenueUsd ?? 0
+              : stats?.paidOrdersGmvUsd ?? 0
+            ).toFixed(2)}
           </div>
           <div className="text-xs text-slate-500 mt-1">
-            {stats?.totalOrders ?? state.orders.length} orders · SaaS Billing $
-            {(stats?.subscriptionRevenueUsd ?? 0).toFixed(2)}
+            {isAdminActor
+              ? 'Tenant store GMV masked for privacy'
+              : `${stats?.totalOrders ?? state.orders.length} orders · SaaS Billing $${(stats?.subscriptionRevenueUsd ?? 0).toFixed(2)}`}
           </div>
         </div>
       </div>
@@ -266,15 +318,16 @@ export function SaasPlatformHubView() {
                     <p className="text-[11px] text-slate-500 leading-relaxed">
                       {feat.description}
                     </p>
-                    {isEnabled && (
-                      <button
-                        type="button"
-                        onClick={() => setNavSection(feat.moduleId)}
-                        className="text-[11px] font-semibold text-emerald-700 hover:underline"
-                      >
-                        Open module →
-                      </button>
-                    )}
+                    {isEnabled &&
+                      canAccessNavSection(activeStaff, feat.moduleId, state.ownerPermissions) && (
+                        <button
+                          type="button"
+                          onClick={() => setNavSection(feat.moduleId)}
+                          className="text-[11px] font-semibold text-emerald-700 hover:underline"
+                        >
+                          Open module →
+                        </button>
+                      )}
                   </div>
                   <button
                     type="button"
@@ -357,21 +410,30 @@ export function SaasPlatformHubView() {
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-          {SAAS_MODULE_REGISTRY.map((mod) => (
-            <button
-              key={mod.id}
-              type="button"
-              onClick={() => setNavSection(mod.id)}
-              className="text-left p-3.5 rounded-xl border border-slate-200 hover:border-emerald-400 hover:bg-emerald-50/30 transition group"
-            >
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-xs font-bold text-slate-900 group-hover:text-emerald-800">
-                  {mod.title}
-                </span>
-                <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase bg-slate-100 text-slate-600">
-                  {mod.recommendedPlan}
-                </span>
-              </div>
+          {SAAS_MODULE_REGISTRY.map((mod) => {
+            const allowed = canAccessNavSection(activeStaff, mod.id, state.ownerPermissions);
+            return (
+              <button
+                key={mod.id}
+                type="button"
+                disabled={!allowed}
+                onClick={() => {
+                  if (allowed) setNavSection(mod.id);
+                }}
+                className={`text-left p-3.5 rounded-xl border transition group ${
+                  allowed
+                    ? 'border-slate-200 hover:border-emerald-400 hover:bg-emerald-50/30'
+                    : 'border-slate-200 bg-slate-50/70 opacity-75 cursor-not-allowed'
+                }`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-bold text-slate-900 group-hover:text-emerald-800">
+                    {mod.title}
+                  </span>
+                  <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase bg-slate-100 text-slate-600">
+                    {!allowed && isAdminActor ? 'Store User Only' : mod.recommendedPlan}
+                  </span>
+                </div>
               <p className="text-[11px] text-slate-500 mt-1 line-clamp-2">{mod.subtitle}</p>
               <div className="mt-2 flex flex-wrap gap-1">
                 {mod.sqliteTables.map((tbl) => (
@@ -383,8 +445,9 @@ export function SaasPlatformHubView() {
                   </span>
                 ))}
               </div>
-            </button>
-          ))}
+              </button>
+            );
+          })}
         </div>
       </div>
 

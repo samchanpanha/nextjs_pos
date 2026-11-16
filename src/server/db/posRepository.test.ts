@@ -125,10 +125,42 @@ test('SQLite Multi-Tenant Repository: bootstrap, SaaS Auth, ACID save/load & sec
     assert.equal(pinCheck.ok, true);
     assert.equal(pinCheck.tenant?.tenantId, created.tenantId);
 
-    // 9. Engine stats reflect subscription revenue and tables
+    // 9. Engine stats reflect subscription revenue and new PO/Accounting tables
     const stats = repo.getSqliteEngineStats();
     assert.ok(stats.totalTenants >= 2);
     assert.equal(stats.subscriptionRevenueUsd, 27);
+    assert.ok((demoTenant.accounts?.length || 0) >= 20, 'Demo store seeded with Chart of Accounts');
+    assert.ok((demoTenant.purchaseOrders?.length || 0) >= 3, 'Demo store seeded with Purchase Orders');
+    assert.ok((demoTenant.journalEntries?.length || 0) >= 10, 'Demo store seeded with balanced Journal Entries');
+
+    // 10. Strict Platform-Only Super Admin: operational store data is redacted for Admin,
+    //     and Admin governance updates NEVER wipe the tenant's real store data in SQLite!
+    const adminLogin = repo.loginAccount({
+      email: 'admin@xaiwork.kh',
+      password: 'admin1234',
+    });
+    const adminAuth = repo.authenticateToken(adminLogin.token);
+    assert.equal(adminAuth.isSuperAdmin, true);
+
+    const adminTenants = repo.listAccessibleTenants(adminAuth);
+    const adminViewOfDemo = adminTenants.find((t) => t.tenantId === 'tenant_lotus_bkk1')!;
+    assert.equal(adminViewOfDemo.storeDataRedactedForAdmin, true);
+    assert.equal(adminViewOfDemo.orders.length, 0, 'Store orders disabled/redacted for Super Admin');
+    assert.equal(adminViewOfDemo.purchaseOrders?.length || 0, 0, 'Store POs disabled/redacted for Super Admin');
+    assert.equal(adminViewOfDemo.journalEntries?.length || 0, 0, 'Store Accounting disabled/redacted for Super Admin');
+
+    // Admin updates tenant featureFlags / ownerPermissions using redacted payload -> store data stays 100% intact!
+    repo.saveTenantState(
+      {
+        ...adminViewOfDemo,
+        featureFlags: { ...(adminViewOfDemo.featureFlags || {}), accounting: true },
+      },
+      { auth: adminAuth }
+    );
+    const reloadedDemoForUser = repo.loadTenantState('tenant_lotus_bkk1')!;
+    assert.ok(reloadedDemoForUser.orders.length >= 5, 'Store orders preserved after Admin metadata update');
+    assert.ok((reloadedDemoForUser.purchaseOrders?.length || 0) >= 3, 'Store POs preserved after Admin metadata update');
+    assert.ok((reloadedDemoForUser.journalEntries?.length || 0) >= 10, 'Store Journal Entries preserved after Admin metadata update');
   } finally {
     conn.close();
   }

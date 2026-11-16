@@ -301,6 +301,101 @@ export const SQLITE_MIGRATIONS: MigrationDef[] = [
       CREATE INDEX IF NOT EXISTS idx_sub_payments_tenant ON subscription_payments(tenant_id, created_at DESC);
     `,
   },
+  {
+    version: 2,
+    name: '002_accounting_and_purchase_orders_schema',
+    upSql: `
+      ALTER TABLE tenants ADD COLUMN next_po_seq INTEGER NOT NULL DEFAULT 1;
+      ALTER TABLE tenants ADD COLUMN next_journal_seq INTEGER NOT NULL DEFAULT 1;
+
+      CREATE TABLE IF NOT EXISTS suppliers (
+        id TEXT NOT NULL,
+        tenant_id TEXT NOT NULL,
+        branch_id TEXT NOT NULL DEFAULT 'all',
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        name TEXT NOT NULL,
+        category TEXT NOT NULL,
+        vattin TEXT,
+        payment_terms TEXT NOT NULL DEFAULT 'cod',
+        active INTEGER NOT NULL DEFAULT 1,
+        data_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (tenant_id, id),
+        FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_suppliers_tenant ON suppliers(tenant_id, active);
+
+      CREATE TABLE IF NOT EXISTS purchase_orders (
+        id TEXT NOT NULL,
+        tenant_id TEXT NOT NULL,
+        branch_id TEXT NOT NULL,
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        po_number TEXT NOT NULL,
+        supplier_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        payment_status TEXT NOT NULL DEFAULT 'unpaid',
+        total_usd REAL NOT NULL DEFAULT 0,
+        balance_due_usd REAL NOT NULL DEFAULT 0,
+        order_date TEXT NOT NULL,
+        due_date TEXT NOT NULL,
+        data_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (tenant_id, id),
+        FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_po_tenant_branch ON purchase_orders(tenant_id, branch_id, status);
+
+      CREATE TABLE IF NOT EXISTS chart_of_accounts (
+        id TEXT NOT NULL,
+        tenant_id TEXT NOT NULL,
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        code TEXT NOT NULL,
+        name_en TEXT NOT NULL,
+        account_type TEXT NOT NULL,
+        normal_balance TEXT NOT NULL,
+        active INTEGER NOT NULL DEFAULT 1,
+        data_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (tenant_id, code),
+        FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_coa_tenant_type ON chart_of_accounts(tenant_id, account_type);
+
+      CREATE TABLE IF NOT EXISTS journal_entries (
+        id TEXT NOT NULL,
+        tenant_id TEXT NOT NULL,
+        branch_id TEXT NOT NULL,
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        entry_no TEXT NOT NULL,
+        entry_date TEXT NOT NULL,
+        source_type TEXT NOT NULL,
+        total_debit_usd REAL NOT NULL DEFAULT 0,
+        total_credit_usd REAL NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        data_json TEXT NOT NULL,
+        PRIMARY KEY (tenant_id, id),
+        FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_journal_tenant_date ON journal_entries(tenant_id, entry_date DESC);
+
+      CREATE TABLE IF NOT EXISTS operating_expenses (
+        id TEXT NOT NULL,
+        tenant_id TEXT NOT NULL,
+        branch_id TEXT NOT NULL,
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        voucher_no TEXT NOT NULL,
+        expense_date TEXT NOT NULL,
+        account_code TEXT NOT NULL,
+        total_usd REAL NOT NULL DEFAULT 0,
+        payment_status TEXT NOT NULL DEFAULT 'paid',
+        data_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (tenant_id, id),
+        FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_expenses_tenant_date ON operating_expenses(tenant_id, expense_date DESC);
+    `,
+  },
 ];
 
 export const TRACKED_SQLITE_TABLES = [
@@ -318,6 +413,11 @@ export const TRACKED_SQLITE_TABLES = [
   'ingredients',
   'recipes',
   'stock_movements',
+  'suppliers',
+  'purchase_orders',
+  'chart_of_accounts',
+  'journal_entries',
+  'operating_expenses',
   'reservations',
   'promotions_loyalty',
   'vat_invoices',
