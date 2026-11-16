@@ -30,9 +30,20 @@ import {
   QrCode,
   Plus,
   Lock,
+  Database,
+  Search,
+  PanelLeftClose,
+  PanelLeftOpen,
+  LayoutGrid,
 } from 'lucide-react';
 import { usePos } from '../context/PosContext';
 import { getNavLabel, I18N } from '../data/i18n';
+import {
+  isModuleEnabledForTenant,
+  MODULE_GROUP_LABELS,
+  SAAS_MODULE_REGISTRY,
+  type ModuleGroupId,
+} from '../modules/registry';
 import type { LanguageCode, NavSection } from '../types/pos';
 import {
   canAccessNavSection,
@@ -46,6 +57,7 @@ import {
   type SubscriptionPlan,
 } from '../utils/subscription';
 import { normalizeInvoiceTemplate } from '../utils/invoiceTemplate';
+import { CommandPalette } from './CommandPalette';
 import { CompanyLogoBadge } from './CompanyLogoBadge';
 import { SubscriptionKhqrCard } from './SubscriptionKhqrCard';
 import { TenantRegistrationModal } from './TenantRegistrationModal';
@@ -71,6 +83,7 @@ export function AppShell({ children }: AppShellProps) {
     switchBranch,
     firebaseUser,
     cloudStatus,
+    sseConnected,
     signInWithGoogle,
     signOutGoogle,
     exitToWelcome,
@@ -80,11 +93,16 @@ export function AppShell({ children }: AppShellProps) {
     syncOfflineBills,
     switchActiveStaff,
     activateTenantSubscription,
+    toasts,
+    dismissToast,
   } = usePos();
 
   const isAdminActor = isSuperAdmin(activeStaff);
 
   const [registerTenantOpen, setRegisterTenantOpen] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [sidebarExpanded, setSidebarExpanded] = useState(false);
+  const [mobileDrawerOpen, setMobileDrawerOpen] = useState(false);
   const [gatePlan, setGatePlan] = useState<SubscriptionPlan>(state.plan || 'daily');
   const [gatePeriods, setGatePeriods] = useState<number>(1);
   const subscriptionActive = isSubscriptionActive(state.subscriptionStatus, state.planDaysLeft);
@@ -113,6 +131,30 @@ export function AppShell({ children }: AppShellProps) {
     return () => clearInterval(id);
   }, []);
 
+  // Global keyboard shortcuts: Ctrl+K / Cmd+K for Command Palette, Alt+1..4 for fast operations
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setPaletteOpen((prev) => !prev);
+      } else if (e.altKey && e.key === '1') {
+        e.preventDefault();
+        setNavSection('sell');
+      } else if (e.altKey && e.key === '2') {
+        e.preventDefault();
+        setNavSection('kds');
+      } else if (e.altKey && e.key === '3') {
+        e.preventDefault();
+        setNavSection('todays_money');
+      } else if (e.altKey && e.key === '4') {
+        e.preventDefault();
+        setNavSection('bills');
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [setNavSection]);
+
   const currentShift = state.shifts.find(
     (s) => s.branchId === activeBranch.id && s.status === 'open'
   );
@@ -125,34 +167,63 @@ export function AppShell({ children }: AppShellProps) {
   const offlineBillsCount = state.orders.filter((o) => o.offlinePendingSync).length;
   const totalNotifications = pendingQr.length + lowIngredients.length;
 
-  const navItems: { id: NavSection; icon: typeof ShoppingBag; simple?: boolean; hiddenIf?: boolean }[] = [
-    { id: 'sell', icon: ShoppingBag, simple: true },
-    { id: 'todays_money', icon: Wallet, simple: true },
-    { id: 'reservations', icon: CalendarDays, hiddenIf: !activeBranch.reservationsEnabled },
-    { id: 'kds', icon: ChefHat },
-    { id: 'bills', icon: Receipt, simple: true },
-    { id: 'shift_drawer', icon: Clock },
-    { id: 'reports', icon: BarChart3 },
-    { id: 'menu_prices', icon: BookOpen },
-    { id: 'stock', icon: Package },
-    { id: 'tables_areas', icon: Grid2x2 },
-    { id: 'promotion', icon: Tag },
-    { id: 'staff', icon: Users },
-    { id: 'sales_book', icon: FileSpreadsheet },
-    { id: 'chain', icon: Building2 },
-    { id: 'audit_log', icon: History },
-    { id: 'plan_billing', icon: Star },
-    { id: 'settings', icon: Settings, simple: true },
+  const navItems: {
+    id: NavSection;
+    icon: typeof ShoppingBag;
+    group: ModuleGroupId;
+    simple?: boolean;
+    hiddenIf?: boolean;
+  }[] = [
+    { id: 'sell', icon: ShoppingBag, group: 'operations', simple: true },
+    { id: 'kds', icon: ChefHat, group: 'operations' },
+    { id: 'todays_money', icon: Wallet, group: 'operations', simple: true },
+    { id: 'bills', icon: Receipt, group: 'operations', simple: true },
+    {
+      id: 'reservations',
+      icon: CalendarDays,
+      group: 'operations',
+      hiddenIf: !activeBranch.reservationsEnabled,
+    },
+    { id: 'shift_drawer', icon: Clock, group: 'operations' },
+    { id: 'menu_prices', icon: BookOpen, group: 'catalog_crm' },
+    { id: 'stock', icon: Package, group: 'catalog_crm' },
+    { id: 'tables_areas', icon: Grid2x2, group: 'catalog_crm' },
+    { id: 'promotion', icon: Tag, group: 'catalog_crm' },
+    { id: 'reports', icon: BarChart3, group: 'finance_compliance' },
+    { id: 'sales_book', icon: FileSpreadsheet, group: 'finance_compliance' },
+    { id: 'audit_log', icon: History, group: 'finance_compliance' },
+    { id: 'staff', icon: Users, group: 'saas_platform' },
+    { id: 'chain', icon: Building2, group: 'saas_platform' },
+    { id: 'saas_hub', icon: Database, group: 'saas_platform' },
+    { id: 'plan_billing', icon: Star, group: 'saas_platform' },
+    { id: 'settings', icon: Settings, group: 'saas_platform', simple: true },
   ];
 
   const visibleNav = navItems.filter((item) => {
     if (item.hiddenIf) return false;
+    if (
+      !isModuleEnabledForTenant(
+        item.id,
+        state.featureFlags,
+        activeBranch.reservationsEnabled
+      )
+    ) {
+      return false;
+    }
     if (!canAccessNavSection(activeStaff, item.id, state.ownerPermissions)) return false;
     if (activeBranch.simpleMode && activeStaff.role !== 'admin') {
       return Boolean(item.simple);
     }
     return true;
   });
+
+  const groupedNav = (['operations', 'catalog_crm', 'finance_compliance', 'saas_platform'] as ModuleGroupId[])
+    .map((grp) => ({
+      group: grp,
+      label: MODULE_GROUP_LABELS[grp][language],
+      items: visibleNav.filter((v) => v.group === grp),
+    }))
+    .filter((g) => g.items.length > 0);
 
   const currentSectionAllowed = canAccessNavSection(
     activeStaff,
@@ -177,57 +248,107 @@ export function AppShell({ children }: AppShellProps) {
 
   return (
     <div className="h-screen overflow-hidden flex bg-[#F4F6F5] text-slate-900">
-      {/* Dark Emerald Sidebar */}
-      <aside className="no-print hidden md:flex w-[76px] lg:w-[88px] shrink-0 flex-col bg-[#08382D] text-emerald-100 select-none">
-        <button
-          type="button"
-          onClick={() => setNavSection('sell')}
-          aria-label="XAIWork POS Home"
-          className="flex h-14 shrink-0 items-center justify-center border-b border-white/10"
-        >
-          {(() => {
-            const tpl = normalizeInvoiceTemplate(activeBranch.invoiceTemplate, {
-              shopName: activeBranch.name || state.shopName,
-              branchCode: activeBranch.code,
-              businessType: state.businessType,
-            });
-            return (
-              <CompanyLogoBadge
-                logoImageUrl={tpl.logoImageUrl}
-                logoIcon={tpl.logoIcon}
-                logoText={tpl.logoText}
-                alt={`${state.shopName} logo`}
-                className="h-9 w-9 rounded-lg text-xs"
-                iconClassName="h-4 w-4"
-                bgClassName="bg-emerald-600"
-                textClassName="text-white"
-              />
-            );
-          })()}
-        </button>
+      {/* Dark Emerald Grouped Sidebar (Collapsible Rail <-> Full SaaS Drawer) */}
+      <aside
+        className={`no-print hidden md:flex shrink-0 flex-col bg-[#08382D] text-emerald-100 select-none transition-all duration-200 ${
+          sidebarExpanded ? 'w-56' : 'w-[82px]'
+        }`}
+      >
+        <div className="flex h-14 shrink-0 items-center justify-between border-b border-white/10 px-2.5">
+          <button
+            type="button"
+            onClick={() => setNavSection('sell')}
+            aria-label="XAIWork POS Home"
+            className="flex items-center gap-2 min-w-0"
+          >
+            {(() => {
+              const tpl = normalizeInvoiceTemplate(activeBranch.invoiceTemplate, {
+                shopName: activeBranch.name || state.shopName,
+                branchCode: activeBranch.code,
+                businessType: state.businessType,
+              });
+              return (
+                <CompanyLogoBadge
+                  logoImageUrl={tpl.logoImageUrl}
+                  logoIcon={tpl.logoIcon}
+                  logoText={tpl.logoText}
+                  alt={`${state.shopName} logo`}
+                  className="h-9 w-9 rounded-lg text-xs shrink-0"
+                  iconClassName="h-4 w-4"
+                  bgClassName="bg-emerald-600"
+                  textClassName="text-white"
+                />
+              );
+            })()}
+            {sidebarExpanded && (
+              <div className="text-left min-w-0">
+                <div className="text-xs font-bold text-white truncate">{state.shopName}</div>
+                <div className="text-[10px] text-emerald-300/80 font-mono truncate">
+                  {state.businessCode}
+                </div>
+              </div>
+            )}
+          </button>
 
-        <nav className="flex-1 overflow-y-auto py-1.5 space-y-0.5 px-1.5" aria-label="POS Modules">
-          {visibleNav.map((item) => {
-            const Icon = item.icon;
-            const active = navSection === item.id;
-            return (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() => setNavSection(item.id)}
-                className={`w-full flex flex-col items-center justify-center rounded-lg px-1 py-1.5 text-center transition-colors ${
-                  active
-                    ? 'bg-emerald-600/35 text-white font-semibold'
-                    : 'text-emerald-100/75 hover:bg-white/10 hover:text-white'
-                }`}
-              >
-                <Icon className="h-4 w-4 mb-0.5 shrink-0" />
-                <span className="text-[10px] leading-tight line-clamp-2">
-                  {getNavLabel(item.id, language)}
-                </span>
-              </button>
-            );
-          })}
+          <button
+            type="button"
+            onClick={() => setSidebarExpanded((v) => !v)}
+            title={sidebarExpanded ? 'Collapse sidebar' : 'Expand grouped sidebar'}
+            className="p-1.5 rounded-lg text-emerald-200/75 hover:bg-white/10 hover:text-white"
+          >
+            {sidebarExpanded ? (
+              <PanelLeftClose className="h-4 w-4" />
+            ) : (
+              <PanelLeftOpen className="h-4 w-4" />
+            )}
+          </button>
+        </div>
+
+        <nav className="flex-1 overflow-y-auto py-2 space-y-3 px-1.5" aria-label="POS Modules">
+          {groupedNav.map((grp) => (
+            <div key={grp.group} className="space-y-0.5">
+              {sidebarExpanded ? (
+                <div className="px-2.5 pb-1 text-[10px] font-bold uppercase tracking-wider text-emerald-300/60">
+                  {grp.label}
+                </div>
+              ) : (
+                <div className="mx-2 my-1 border-t border-white/10 first:hidden" />
+              )}
+              {grp.items.map((item) => {
+                const Icon = item.icon;
+                const active = navSection === item.id;
+                const modDef = SAAS_MODULE_REGISTRY.find((m) => m.id === item.id);
+                return (
+                  <button
+                    key={item.id}
+                    type="button"
+                    title={!sidebarExpanded ? `${getNavLabel(item.id, language)} — ${modDef?.subtitle || ''}` : undefined}
+                    onClick={() => setNavSection(item.id)}
+                    className={`w-full rounded-lg transition-colors ${
+                      sidebarExpanded
+                        ? 'flex items-center gap-2.5 px-2.5 py-2 text-left'
+                        : 'flex flex-col items-center justify-center px-1 py-1.5 text-center'
+                    } ${
+                      active
+                        ? 'bg-emerald-600/40 text-white font-semibold shadow-2xs'
+                        : 'text-emerald-100/75 hover:bg-white/10 hover:text-white'
+                    }`}
+                  >
+                    <Icon className="h-4 w-4 shrink-0" />
+                    <span
+                      className={
+                        sidebarExpanded
+                          ? 'text-xs truncate flex-1'
+                          : 'text-[10px] leading-tight line-clamp-2 mt-0.5'
+                      }
+                    >
+                      {getNavLabel(item.id, language)}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          ))}
         </nav>
       </aside>
 
@@ -374,18 +495,36 @@ export function AppShell({ children }: AppShellProps) {
 
           {/* Right Controls */}
           <div className="flex items-center gap-2 shrink-0">
-            {/* Offline / Online Queue Button */}
+            {/* Command Palette Launcher (Ctrl+K / Cmd+K) */}
+            <button
+              type="button"
+              onClick={() => setPaletteOpen(true)}
+              title="Quick Search & Command Palette (Ctrl+K)"
+              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-100"
+            >
+              <Search className="h-3.5 w-3.5 text-emerald-700" />
+              <span className="hidden xl:inline">Quick Jump</span>
+              <kbd className="hidden sm:inline rounded bg-white border border-slate-200 px-1.5 py-0.2 text-[10px] font-mono text-slate-500">
+                ⌘K
+              </kbd>
+            </button>
+
+            {/* Offline / SQLite Live Sync Button */}
             <button
               type="button"
               onClick={() => {
                 if (state.offlineMode) syncOfflineBills();
                 else toggleOfflineMode();
               }}
-              title={state.offlineMode ? 'Click to go online & sync bills' : 'Toggle offline selling mode'}
+              title={
+                state.offlineMode
+                  ? 'Click to go online & flush queued bills to SQLite'
+                  : 'SQLite WAL + SSE Sync Active (click to test offline queue)'
+              }
               className={`hidden sm:inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium whitespace-nowrap ${
                 state.offlineMode
                   ? 'border-amber-300 bg-amber-50 text-amber-900'
-                  : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
+                  : 'border-emerald-200 bg-emerald-50/60 text-emerald-900 hover:bg-emerald-50'
               }`}
             >
               {state.offlineMode ? (
@@ -398,8 +537,14 @@ export function AppShell({ children }: AppShellProps) {
                 </>
               ) : (
                 <>
-                  <Wifi className="h-3.5 w-3.5 text-emerald-700" />
-                  <span>{firebaseUser && cloudStatus === 'synced' ? 'Cloud Synced' : t.onlineSync}</span>
+                  <Database className="h-3.5 w-3.5 text-emerald-700" />
+                  <span>
+                    {cloudStatus === 'syncing'
+                      ? 'Saving SQLite...'
+                      : sseConnected
+                        ? 'SQLite Live'
+                        : 'SQLite Synced'}
+                  </span>
                 </>
               )}
             </button>
@@ -589,8 +734,8 @@ export function AppShell({ children }: AppShellProps) {
                       }}
                       className="w-full flex items-center gap-2 rounded-lg px-2.5 py-2 text-emerald-800 font-semibold hover:bg-emerald-50"
                     >
-                      <Check className="h-3.5 w-3.5" />
-                      Connect Google Cloud Database
+                      <Database className="h-3.5 w-3.5" />
+                      Connect SQLite Owner Session
                     </button>
                   ) : (
                     <button
@@ -602,7 +747,7 @@ export function AppShell({ children }: AppShellProps) {
                       className="w-full flex items-center gap-2 rounded-lg px-2.5 py-2 text-slate-700 hover:bg-slate-50"
                     >
                       <LogOut className="h-3.5 w-3.5" />
-                      Disconnect Google Account
+                      Disconnect SQLite Session
                     </button>
                   )}
 
@@ -794,24 +939,128 @@ export function AppShell({ children }: AppShellProps) {
           )}
         </main>
 
-        {/* Mobile Bottom Navigation */}
+        {/* Mobile Bottom Navigation + All Modules Drawer Trigger */}
         <nav className="no-print md:hidden border-t border-slate-200 bg-white px-2 py-1.5 flex items-center justify-around text-[11px]">
-          {(['sell', 'kds', 'todays_money', 'reports', 'settings'] as NavSection[])
+          {(['sell', 'kds', 'todays_money', 'bills'] as NavSection[])
             .filter((id) => canAccessNavSection(activeStaff, id, state.ownerPermissions))
             .map((id) => (
               <button
                 key={id}
                 type="button"
-                onClick={() => setNavSection(id)}
-                className={`px-2 py-1 rounded-md font-medium ${
+                onClick={() => {
+                  setNavSection(id);
+                  setMobileDrawerOpen(false);
+                }}
+                className={`px-2.5 py-1.5 rounded-lg font-medium ${
                   navSection === id ? 'bg-emerald-800 text-white' : 'text-slate-600'
                 }`}
               >
                 {getNavLabel(id, language)}
               </button>
             ))}
+          <button
+            type="button"
+            onClick={() => setMobileDrawerOpen(true)}
+            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg font-semibold bg-slate-100 text-slate-800"
+          >
+            <LayoutGrid className="h-3.5 w-3.5 text-emerald-700" />
+            Modules ({visibleNav.length})
+          </button>
         </nav>
       </div>
+
+      {/* Mobile All-Modules Drawer */}
+      {mobileDrawerOpen && (
+        <div
+          className="fixed inset-0 z-50 md:hidden bg-slate-900/50 flex flex-col justify-end"
+          onClick={() => setMobileDrawerOpen(false)}
+        >
+          <div
+            className="bg-white rounded-t-2xl max-h-[82vh] overflow-y-auto p-4 space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-slate-100 pb-2.5">
+              <div>
+                <h3 className="text-sm font-bold text-slate-900">All SaaS Modules</h3>
+                <p className="text-[11px] text-slate-500">
+                  {state.shopName} · {activeBranch.name}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setMobileDrawerOpen(false)}
+                className="p-1.5 rounded-lg bg-slate-100 text-slate-600"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            {groupedNav.map((grp) => (
+              <div key={grp.group} className="space-y-1.5">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                  {grp.label}
+                </div>
+                <div className="grid grid-cols-3 gap-2">
+                  {grp.items.map((item) => {
+                    const Icon = item.icon;
+                    const active = navSection === item.id;
+                    return (
+                      <button
+                        key={item.id}
+                        type="button"
+                        onClick={() => {
+                          setNavSection(item.id);
+                          setMobileDrawerOpen(false);
+                        }}
+                        className={`flex flex-col items-center justify-center rounded-xl border p-2.5 text-center ${
+                          active
+                            ? 'border-emerald-700 bg-emerald-50 text-emerald-950 font-semibold'
+                            : 'border-slate-200 bg-slate-50 text-slate-700'
+                        }`}
+                      >
+                        <Icon className="h-4 w-4 mb-1 text-emerald-800" />
+                        <span className="text-[11px] leading-tight">
+                          {getNavLabel(item.id, language)}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Floating Toast Notification Stack */}
+      {toasts.length > 0 && (
+        <div className="no-print fixed bottom-16 md:bottom-4 right-4 z-50 flex flex-col gap-2 max-w-sm pointer-events-none">
+          {toasts.map((toast) => (
+            <div
+              key={toast.id}
+              className={`pointer-events-auto flex items-center justify-between gap-3 rounded-xl px-3.5 py-2.5 text-xs font-medium shadow-lg border backdrop-blur-xs ${
+                toast.tone === 'success'
+                  ? 'bg-emerald-950/95 text-emerald-50 border-emerald-700'
+                  : toast.tone === 'warning'
+                    ? 'bg-amber-950/95 text-amber-50 border-amber-700'
+                    : toast.tone === 'error'
+                      ? 'bg-red-950/95 text-red-50 border-red-700'
+                      : 'bg-slate-900/95 text-white border-slate-700'
+              }`}
+            >
+              <span>{toast.message}</span>
+              <button
+                type="button"
+                onClick={() => dismissToast(toast.id)}
+                className="text-white/60 hover:text-white"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
 
       {/* Staff PIN Switch Modal */}
       {pinSwitchModal && (

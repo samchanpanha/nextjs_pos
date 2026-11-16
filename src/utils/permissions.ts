@@ -124,6 +124,12 @@ export const PERMISSION_DEFINITIONS: PermissionMeta[] = [
     group: 'admin_settings',
   },
   {
+    key: 'saas_hub',
+    label: 'SQLite & SaaS Modules Hub',
+    description: 'Inspect SQLite database health, backups, feature flags, and modular SaaS architecture.',
+    group: 'admin_settings',
+  },
+  {
     key: 'plan_billing',
     label: 'Plan & Billing (KHQR)',
     description: 'Manage Daily ($1/day), Standard, and Premium subscriptions.',
@@ -331,6 +337,7 @@ const NAV_PRIORITY: NavSection[] = [
   'sales_book',
   'staff',
   'chain',
+  'saas_hub',
   'audit_log',
   'plan_billing',
   'settings',

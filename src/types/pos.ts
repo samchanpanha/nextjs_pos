@@ -3,6 +3,8 @@ import type { PermissionKey } from '../utils/permissions';
 import type { SubscriptionPlan, SubscriptionStatus } from '../utils/subscription';
 import type { InvoiceTemplateConfig } from '../utils/invoiceTemplate';
 
+export type { OrderLineItem, PromotionRule };
+
 export type LanguageCode = 'en' | 'kh' | 'vi';
 
 export type NavSection =
@@ -20,6 +22,7 @@ export type NavSection =
   | 'staff'
   | 'sales_book'
   | 'chain'
+  | 'saas_hub'
   | 'audit_log'
   | 'plan_billing'
   | 'settings';
@@ -34,6 +37,43 @@ export interface PlatformSettings {
   demoUsersDisabled: boolean;
   updatedAt?: string;
   updatedBy?: string;
+  maintenanceBanner?: string;
+}
+
+export interface SaasUser {
+  uid: string;
+  email: string;
+  displayName: string;
+  role: 'admin' | 'owner' | 'staff';
+  emailVerified: boolean;
+  createdAt?: string;
+}
+
+export interface SqliteEngineStats {
+  engine: string;
+  sqliteVersion: string;
+  journalMode: string;
+  dbPath: string;
+  dbSizeBytes: number;
+  tableCounts: Record<string, number>;
+  totalTenants: number;
+  activeTenants: number;
+  suspendedTenants: number;
+  demoTenants: number;
+  totalOrders: number;
+  paidOrdersGmvUsd: number;
+  subscriptionRevenueUsd: number;
+  recentSubscriptions: {
+    id: string;
+    tenantId: string;
+    tenantName: string;
+    plan: SubscriptionPlan;
+    daysGranted: number;
+    amountUsd: number;
+    paymentRef: string;
+    createdAt: string;
+  }[];
+  checkedAt: string;
 }
 
 export interface StaffMember {
@@ -427,4 +467,14 @@ export interface PosAppState {
   offlineMode: boolean;
   displayActiveOrderId: string | null;
   displayShowKhqr: boolean;
+  featureFlags?: Record<string, boolean>;
+  version?: number;
 }
+
+export type Order = PosOrder;
+export type Promotion = PromotionRule;
+export type LoyaltyMember = MemberCustomer;
+export type CustomerPack = CustomerPrepaidPack;
+export type StockMovement = StockHistoryEntry;
+export type RecipeLine = { ingredientId: string; qtyPerPortion: number };
+export type DailyRevenuePoint = { date: string; netSalesUsd: number; bills: number; guests: number };

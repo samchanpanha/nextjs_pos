@@ -24,6 +24,7 @@ import {
   Lock,
   FileText,
   Ban,
+  Pencil,
 } from 'lucide-react';
 import { usePos } from '../context/PosContext';
 import { MENU_IMAGE_PRESETS } from '../data/seedData';
@@ -613,6 +614,7 @@ export function MenuManagementView() {
 
 export function TablesAreasView() {
   const { state, activeBranch, saveTable, deleteTable, setExternalMode } = usePos();
+  const [editingTableId, setEditingTableId] = useState<string | null>(null);
   const [name, setName] = useState('');
   const [area, setArea] = useState<PosTable['area']>('Indoor');
   const [seats, setSeats] = useState('4');
@@ -622,8 +624,15 @@ export function TablesAreasView() {
   const handleAddTable = (e: React.FormEvent) => {
     e.preventDefault();
     if (!name.trim()) return;
-    saveTable({ name: name.trim(), area, seats: Math.max(1, Number(seats) || 4) });
+    saveTable({
+      id: editingTableId || undefined,
+      name: name.trim(),
+      area,
+      seats: Math.max(1, Number(seats) || 4),
+    });
+    setEditingTableId(null);
     setName('');
+    setSeats('4');
   };
 
   return (
@@ -695,8 +704,21 @@ export function TablesAreasView() {
           type="submit"
           className="inline-flex items-center gap-1 rounded-lg bg-emerald-800 px-4 py-1.5 font-semibold text-white"
         >
-          <Plus className="h-3.5 w-3.5" /> Add Table
+          <Plus className="h-3.5 w-3.5" /> {editingTableId ? 'Save Changes' : 'Add Table'}
         </button>
+        {editingTableId && (
+          <button
+            type="button"
+            onClick={() => {
+              setEditingTableId(null);
+              setName('');
+              setSeats('4');
+            }}
+            className="rounded-lg border border-slate-300 px-3 py-1.5 font-semibold text-slate-600 hover:bg-slate-50"
+          >
+            Cancel
+          </button>
+        )}
       </form>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
@@ -726,13 +748,27 @@ export function TablesAreasView() {
             />
             <div className="no-print mt-2.5 w-full flex items-center justify-between text-[11px]">
               <span className="capitalize text-slate-500">{t.status}</span>
-              <button
-                type="button"
-                onClick={() => deleteTable(t.id)}
-                className="text-red-600 hover:underline inline-flex items-center gap-0.5"
-              >
-                <Trash2 className="h-3 w-3" /> Remove
-              </button>
+              <div className="inline-flex items-center gap-2.5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditingTableId(t.id);
+                    setName(t.name);
+                    setArea(t.area);
+                    setSeats(String(t.seats));
+                  }}
+                  className="text-emerald-800 font-semibold hover:underline inline-flex items-center gap-0.5"
+                >
+                  <Pencil className="h-3 w-3" /> Edit
+                </button>
+                <button
+                  type="button"
+                  onClick={() => deleteTable(t.id)}
+                  className="text-red-600 hover:underline inline-flex items-center gap-0.5"
+                >
+                  <Trash2 className="h-3 w-3" /> Remove
+                </button>
+              </div>
             </div>
           </div>
         ))}
@@ -1383,6 +1419,26 @@ export function StaffView() {
                   <button
                     type="button"
                     onClick={() => {
+                      const nextPin = window.prompt(
+                        `Enter new 4-digit PIN for ${selectedMember.name}:`,
+                        selectedMember.pin
+                      );
+                      if (!nextPin) return;
+                      const cleanPin = nextPin.replace(/\D/g, '').slice(0, 4);
+                      if (cleanPin.length !== 4) {
+                        setFeedback('PIN must be exactly 4 digits.');
+                        return;
+                      }
+                      saveStaffMember({ ...selectedMember, pin: cleanPin }, effectiveTenantId);
+                      setFeedback(`Updated PIN for ${selectedMember.name} to ${cleanPin}.`);
+                    }}
+                    className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 font-semibold text-slate-700 hover:bg-slate-50"
+                  >
+                    Change PIN
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
                       const defaults = [...(DEFAULT_ROLE_PERMISSIONS[selectedMember.role] || [])];
                       if (updateStaffPermissions(selectedMember.id, defaults, effectiveTenantId)) {
                         setFeedback(`Reset ${selectedMember.name} to ${selectedMember.roleLabel} defaults.`);
@@ -1581,6 +1637,7 @@ export function ChainView() {
   } = usePos();
   const [name, setName] = useState('');
   const [code, setCode] = useState('');
+  const [cloneFromCurrent, setCloneFromCurrent] = useState(true);
   const [registerOpen, setRegisterOpen] = useState(false);
   const [chainFeedback, setChainFeedback] = useState('');
   const isAdminActor = canManageOwnerGrants(activeStaff);
@@ -1591,7 +1648,7 @@ export function ChainView() {
   const handleAdd = (e: React.FormEvent) => {
     e.preventDefault();
     if (!name.trim() || !code.trim()) return;
-    addBranch(name.trim(), code.trim());
+    addBranch(name.trim(), code.trim(), undefined, cloneFromCurrent);
     setName('');
     setCode('');
   };
@@ -1886,6 +1943,15 @@ export function ChainView() {
               onChange={(e) => setCode(e.target.value)}
               className="w-full rounded-lg border border-slate-300 px-3 py-2 font-mono uppercase"
             />
+            <label className="flex items-center gap-2 text-xs text-slate-700 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={cloneFromCurrent}
+                onChange={(e) => setCloneFromCurrent(e.target.checked)}
+                className="rounded border-slate-300 text-emerald-700 focus:ring-emerald-700"
+              />
+              <span>Clone menu, tables &amp; ingredients from {activeBranch.code}</span>
+            </label>
             <button
               type="submit"
               className="w-full rounded-lg bg-emerald-800 py-2 font-semibold text-white"

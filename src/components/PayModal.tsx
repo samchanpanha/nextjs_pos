@@ -565,31 +565,60 @@ export function PayModal({ order, onClose }: PayModalProps) {
                     </button>
                   </div>
 
-                  {/* Quick Cash Buttons */}
-                  <div className="grid grid-cols-5 gap-2 text-xs font-semibold tabular-nums">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setUsdInput(totals.totalUsd.toFixed(2));
-                        setKhrInput('');
-                      }}
-                      className="rounded-lg border border-emerald-300 bg-emerald-50 py-2 text-emerald-900 hover:bg-emerald-100"
-                    >
-                      Exact ${totals.totalUsd.toFixed(2)}
-                    </button>
-                    {[10, 20, 50, 100].map((amt) => (
+                  {/* Quick Cash Buttons (USD + Cambodian Riel) */}
+                  <div className="space-y-1.5">
+                    <div className="grid grid-cols-5 gap-2 text-xs font-semibold tabular-nums">
                       <button
-                        key={amt}
                         type="button"
                         onClick={() => {
-                          setUsdInput(String(amt));
+                          setUsdInput(totals.totalUsd.toFixed(2));
+                          setKhrInput('');
                           setActiveField('USD');
                         }}
-                        className="rounded-lg border border-slate-200 bg-slate-50 py-2 text-slate-800 hover:bg-slate-100"
+                        className="rounded-lg border border-emerald-300 bg-emerald-50 py-2 text-emerald-900 hover:bg-emerald-100"
                       >
-                        ${amt}.00
+                        Exact ${totals.totalUsd.toFixed(2)}
                       </button>
-                    ))}
+                      {[10, 20, 50, 100].map((amt) => (
+                        <button
+                          key={amt}
+                          type="button"
+                          onClick={() => {
+                            setUsdInput(String(amt));
+                            setActiveField('USD');
+                          }}
+                          className="rounded-lg border border-slate-200 bg-slate-50 py-2 text-slate-800 hover:bg-slate-100"
+                        >
+                          ${amt}.00
+                        </button>
+                      ))}
+                    </div>
+                    <div className="grid grid-cols-5 gap-2 text-[11px] font-semibold tabular-nums">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setUsdInput('');
+                          setKhrInput(String(totals.totalKhr));
+                          setActiveField('KHR');
+                        }}
+                        className="rounded-lg border border-amber-300 bg-amber-50 py-1.5 text-amber-950 hover:bg-amber-100"
+                      >
+                        Exact {totals.totalKhr.toLocaleString()}៛
+                      </button>
+                      {[10000, 20000, 50000, 100000].map((riel) => (
+                        <button
+                          key={riel}
+                          type="button"
+                          onClick={() => {
+                            setKhrInput(String(riel));
+                            setActiveField('KHR');
+                          }}
+                          className="rounded-lg border border-slate-200 bg-white py-1.5 text-slate-700 hover:bg-slate-50"
+                        >
+                          {(riel / 1000).toFixed(0)}k ៛
+                        </button>
+                      ))}
+                    </div>
                   </div>
 
                   {/* Keypad + Change Summary */}

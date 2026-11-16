@@ -13,7 +13,13 @@ export function GroupOrderView() {
     setExternalMode,
   } = usePos();
 
-  const [activeSessionId, setActiveSessionId] = useState(state.groupSessions[0]?.id || '');
+  const [activeSessionId, setActiveSessionId] = useState(() => {
+    const idParam = new URLSearchParams(window.location.search).get('id');
+    if (idParam && state.groupSessions.some((g) => g.id === idParam)) {
+      return idParam;
+    }
+    return state.groupSessions[0]?.id || '';
+  });
   const [tab, setTab] = useState<'pick' | 'whole'>('pick');
   const [participantName, setParticipantName] = useState('Dara');
   const [itemNote, setItemNote] = useState('');

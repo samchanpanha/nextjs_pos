@@ -43,7 +43,7 @@ export function createSeedState(preset: DemoPresetType = 'restaurant'): PosAppSt
       ? 'Kampuchea Express Counter'
       : 'Lotus Café BKK1';
 
-  return {
+  const baseState: PosAppState = {
     tenantId: 'tenant_lotus_bkk1',
     isDemoTenant: true,
     tenantStatus: 'active',
@@ -1500,6 +1500,111 @@ export function createSeedState(preset: DemoPresetType = 'restaurant'): PosAppSt
     offlineMode: false,
     displayActiveOrderId: 'ord_t02',
     displayShowKhqr: false,
+    featureFlags: {},
+    version: 1,
+  };
+
+  return cloneBranchResources(baseState, 'branch_bkk1', 'branch_rvs');
+}
+
+export function cloneBranchResources(
+  state: PosAppState,
+  sourceBranchId: string,
+  targetBranchId: string,
+  options?: { cloneMenu?: boolean; cloneTables?: boolean; cloneIngredients?: boolean }
+): PosAppState {
+  const cloneMenu = options?.cloneMenu ?? true;
+  const cloneTables = options?.cloneTables ?? true;
+  const cloneIngredients = options?.cloneIngredients ?? true;
+
+  const existingTargetMenu = state.menuItems.some((m) => m.branchId === targetBranchId);
+  const existingTargetTables = state.tables.some((t) => t.branchId === targetBranchId);
+  const existingTargetIngs = state.ingredients.some((i) => i.branchId === targetBranchId);
+
+  const sourceMenu = state.menuItems.filter((m) => m.branchId === sourceBranchId);
+  const sourceTables = state.tables.filter((t) => t.branchId === sourceBranchId);
+  const sourceIngs = state.ingredients.filter((i) => i.branchId === sourceBranchId);
+
+  const menuIdMap = new Map<string, string>();
+  const ingIdMap = new Map<string, string>();
+
+  const newMenuItems =
+    cloneMenu && !existingTargetMenu
+      ? sourceMenu.map((m) => {
+          const newId = `${targetBranchId}_${m.id}`;
+          menuIdMap.set(m.id, newId);
+          return { ...m, id: newId, branchId: targetBranchId };
+        })
+      : [];
+
+  const newTables =
+    cloneTables && !existingTargetTables
+      ? sourceTables.map((t) => ({
+          ...t,
+          id: `${targetBranchId}_${t.id}`,
+          branchId: targetBranchId,
+          status: 'free' as const,
+          activeOrderId: undefined,
+          guests: undefined,
+          occupiedSince: undefined,
+        }))
+      : [];
+
+  const newIngredients =
+    cloneIngredients && !existingTargetIngs
+      ? sourceIngs.map((ing) => {
+          const newId = `${targetBranchId}_${ing.id}`;
+          ingIdMap.set(ing.id, newId);
+          return { ...ing, id: newId, branchId: targetBranchId };
+        })
+      : [];
+
+  const newRecipes =
+    newMenuItems.length > 0 && newIngredients.length > 0
+      ? state.recipes
+          .filter((r) => menuIdMap.has(r.menuItemId))
+          .map((r) => ({
+            menuItemId: menuIdMap.get(r.menuItemId)!,
+            lines: r.lines
+              .filter((l) => ingIdMap.has(l.ingredientId))
+              .map((l) => ({
+                ingredientId: ingIdMap.get(l.ingredientId)!,
+                qtyPerPortion: l.qtyPerPortion,
+              })),
+          }))
+      : [];
+
+  const hasTargetShift = state.shifts.some(
+    (s) => s.branchId === targetBranchId && s.status === 'open'
+  );
+  const newShifts = !hasTargetShift
+    ? [
+        {
+          id: `shift_${targetBranchId}_open`,
+          branchId: targetBranchId,
+          cashierName: state.staff[0]?.name || 'Owner',
+          status: 'open' as const,
+          openingUsd: 50,
+          openingKhr: 200000,
+          countedUsd: 0,
+          countedKhr: 0,
+          expectedUsd: 50,
+          expectedKhr: 200000,
+          varianceUsd: 0,
+          varianceKhr: 0,
+          pettyCash: [],
+          openedAt: new Date().toISOString(),
+        },
+      ]
+    : [];
+
+  return {
+    ...state,
+    menuItems: [...state.menuItems, ...newMenuItems],
+    tables: [...state.tables, ...newTables],
+    ingredients: [...state.ingredients, ...newIngredients],
+    recipes: [...state.recipes, ...newRecipes],
+    shifts: [...state.shifts, ...newShifts],
   };
 }
 

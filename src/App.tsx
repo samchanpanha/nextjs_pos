@@ -23,6 +23,7 @@ import {
   TablesAreasView,
 } from './components/ManagementViews';
 import { ReceiptModal } from './components/ReceiptModal';
+import { SaasPlatformHubView } from './components/SaasPlatformHubView';
 
 function PosRouter() {
   const {
@@ -84,6 +85,8 @@ function PosRouter() {
         return <SalesBookView />;
       case 'chain':
         return <ChainView />;
+      case 'saas_hub':
+        return <SaasPlatformHubView />;
       case 'audit_log':
         return <AuditLogView />;
       case 'plan_billing':

@@ -1,29 +1,30 @@
-import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
-import { onAuthStateChanged, signInWithPopup, signOut, type User } from 'firebase/auth';
-import { auth, googleProvider } from '../lib/firebase';
+import React, {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import {
-  createAuditLogInFirestore,
-  createInvoiceInFirestore,
-  ensureAdminInFirestore,
-  ensureUserAndShop,
-  fetchPlatformConfigFromFirestore,
-  getShopIdForTenant,
-  listUserShopsFromFirestore,
-  registerTenantInFirestore,
-  savePlatformConfigInFirestore,
-  syncBranchToFirestore,
-  syncIngredientToFirestore,
-  syncMenuItemToFirestore,
-  syncOrderToFirestore,
-  syncReservationToFirestore,
-  syncShiftToFirestore,
-  syncStaffMemberToFirestore,
-  syncTableToFirestore,
-  updateShopOwnerPermissionsInFirestore,
-  updateShopSubscriptionInFirestore,
-  updateShopTenantStatusInFirestore,
-} from '../lib/firestoreSync';
+  CLIENT_TAB_ID,
+  activateSubscriptionInSqlite,
+  createTenantInSqlite,
+  deleteTenantFromSqlite,
+  fetchCurrentSession,
+  fetchTenantFromSqlite,
+  loginSaasAccount,
+  logoutSaasAccount,
+  registerSaasAccount,
+  resetSaasAccountPassword,
+  savePlatformSettingsToSqlite,
+  saveTenantToSqlite,
+  subscribeToSqliteRealtime,
+  verifyStaffPinOnSqlite,
+} from '../lib/sqliteClient';
 import {
+  cloneBranchResources,
   createSeedState,
   createTenantSeedState,
   type DemoPresetType,
@@ -35,17 +36,21 @@ import type {
   ExternalMode,
   Ingredient,
   LanguageCode,
+  LoyaltyMember,
   MenuItem,
   NavSection,
+  Order,
   OrderChannel,
+  OrderLineItem,
   PettyCashEntry,
   PlatformSettings,
   PosAppState,
-  PosOrder,
   PosTable,
   PrepaidPackTemplate,
+  Promotion,
   QrIncomingOrder,
   Reservation,
+  SaasUser,
   ShiftRecord,
   StaffMember,
   TenantStatus,
@@ -57,9 +62,9 @@ import {
   calculateOrderTotals,
   roundCurrency,
   usdToKhr,
-  type OrderLineItem,
-  type PromotionRule,
 } from '../utils/posMath';
+type PosOrder = Order;
+type PromotionRule = Promotion;
 import {
   ALL_PERMISSIONS,
   canAssignRole,
@@ -126,13 +131,36 @@ interface PosContextValue {
     pinOrPassword: string,
     businessCode?: string
   ) => { ok: boolean; error?: string };
+  staffSignInRemote: (
+    username: string,
+    pinOrPassword: string,
+    businessCode?: string
+  ) => Promise<{ ok: boolean; error?: string }>;
   exitToWelcome: () => void;
-  firebaseUser: User | null;
+  firebaseUser: SaasUser | null;
+  saasUser: SaasUser | null;
   shopId: string | null;
   authLoading: boolean;
   cloudStatus: 'demo' | 'synced' | 'syncing' | 'error';
+  sseConnected: boolean;
+  loginWithEmailPassword: (email: string, password: string) => Promise<void>;
+  registerWithEmailPassword: (
+    email: string,
+    password: string,
+    displayName?: string
+  ) => Promise<void>;
+  resetSaasPassword: (email: string, newPassword?: string) => Promise<string>;
   signInWithGoogle: () => Promise<void>;
   signOutGoogle: () => Promise<void>;
+  toasts: { id: string; message: string; tone: 'success' | 'info' | 'warning' | 'error' }[];
+  notify: (message: string, tone?: 'success' | 'info' | 'warning' | 'error') => void;
+  dismissToast: (id: string) => void;
+  setOrderGuests: (orderId: string, guests: number) => void;
+  cancelEmptyOrder: (orderId: string) => boolean;
+  voidOrder: (orderId: string, reason: string, managerPin: string) => boolean;
+  addLoyaltyMember: (params: { name: string; phone: string; initialPoints?: number }) => LoyaltyMember | null;
+  toggleTenantFeatureFlag: (moduleKey: string, enabled: boolean) => void;
+  reloadTenantsFromSqlite: () => Promise<void>;
   selectedTableId: string | null;
   setSelectedTableId: (tableId: string | null) => void;
   activeOrderId: string | null;
@@ -242,7 +270,7 @@ interface PosContextValue {
   issueTaxInvoice: (invoiceId: string, buyerName: string, buyerVattin: string) => void;
   createCreditNote: (invoiceId: string) => void;
   updateBranchSettings: (partial: Partial<BranchConfig>) => void;
-  addBranch: (name: string, code: string) => void;
+  addBranch: (name: string, code: string, address?: string, cloneFromCurrent?: boolean) => void;
   setPlan: (plan: SubscriptionPlan) => void;
   activateTenantSubscription: (params: {
     plan: SubscriptionPlan;
@@ -427,11 +455,33 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
   const [activeOrderId, setActiveOrderId] = useState<string | null>(null);
   const [receiptOrder, setReceiptOrder] = useState<PosOrder | null>(null);
 
-  const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
+  const [firebaseUser, setFirebaseUser] = useState<SaasUser | null>(null);
   const [isCloudAdmin, setIsCloudAdmin] = useState<boolean>(false);
   const [shopId, setShopId] = useState<string | null>(null);
   const [authLoading, setAuthLoading] = useState<boolean>(true);
-  const [cloudStatus, setCloudStatus] = useState<'demo' | 'synced' | 'syncing' | 'error'>('demo');
+  const [cloudStatus, setCloudStatus] = useState<'demo' | 'synced' | 'syncing' | 'error'>('synced');
+  const [sseConnected, setSseConnected] = useState<boolean>(false);
+  const [toasts, setToasts] = useState<
+    { id: string; message: string; tone: 'success' | 'info' | 'warning' | 'error' }[]
+  >([]);
+
+  const skipSqlitePushRef = useRef<boolean>(true);
+  const hydratedFromSqliteRef = useRef<boolean>(false);
+
+  const dismissToast = useCallback((id: string) => {
+    setToasts((prev) => prev.filter((t) => t.id !== id));
+  }, []);
+
+  const notify = useCallback(
+    (message: string, tone: 'success' | 'info' | 'warning' | 'error' = 'info') => {
+      const id = `toast_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+      setToasts((prev) => [...prev.slice(-3), { id, message, tone }]);
+      setTimeout(() => {
+        setToasts((prev) => prev.filter((t) => t.id !== id));
+      }, 3600);
+    },
+    []
+  );
 
   useEffect(() => {
     try {
@@ -441,110 +491,225 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     }
   }, [platformSettings]);
 
+  // Debounced localStorage write (prevents blocking UI thread on large catalog clicks)
   useEffect(() => {
     const tid = state.tenantId || activeTenantId;
-    setRawTenantStates((prev) => {
-      const nextMap = { ...prev, [tid]: state };
+    setRawTenantStates((prev) => ({ ...prev, [tid]: state }));
+
+    const timer = setTimeout(() => {
       try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-        localStorage.setItem(
-          TENANTS_STORAGE_KEY,
-          JSON.stringify({ activeTenantId: tid, states: nextMap })
-        );
+        setRawTenantStates((curr) => {
+          localStorage.setItem(
+            TENANTS_STORAGE_KEY,
+            JSON.stringify({ activeTenantId: tid, states: curr })
+          );
+          return curr;
+        });
       } catch {
         // ignore storage quota errors
       }
-      return nextMap;
-    });
+    }, 180);
+
+    return () => clearTimeout(timer);
   }, [state, activeTenantId]);
 
-  useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async (user) => {
-      setFirebaseUser(user);
-      if (user) {
-        setCloudStatus('syncing');
-        try {
-          const cloudAdminFlag = await ensureAdminInFirestore(user);
-          setIsCloudAdmin(cloudAdminFlag);
-          const sid = await ensureUserAndShop(user, state);
-          setShopId(sid);
-          const remotePlatform = await fetchPlatformConfigFromFirestore().catch(() => null);
-          if (remotePlatform) {
-            setPlatformSettings((prev) => ({ ...prev, ...remotePlatform }));
-          }
-          if (cloudAdminFlag) {
-            setState((prev) => {
-              const adminAccount = prev.staff.find((s) => s.role === 'admin');
-              return adminAccount ? { ...prev, activeStaffId: adminAccount.id } : prev;
-            });
-          }
-          // Discover any additional registered cloud tenants for this user (or all tenants for Super Admin)
-          const cloudShops = await listUserShopsFromFirestore(user.uid, cloudAdminFlag);
-          if (cloudShops.length > 0) {
-            setRawTenantStates((prev) => {
-              const next = { ...prev };
-              for (const cs of cloudShops) {
-                const existingKey = Object.keys(next).find(
-                  (k) => next[k].businessCode.toUpperCase() === cs.businessCode.toUpperCase()
-                );
-                if (existingKey) {
-                  next[existingKey] = normalizeTenantRbac({
-                    ...next[existingKey],
-                    ownerUid: cs.ownerUid,
-                    tenantStatus: cs.tenantStatus,
-                    isDemoTenant: cs.isDemo,
-                    ownerPermissions: cs.ownerPermissions ?? next[existingKey].ownerPermissions,
-                  });
-                } else if (cs.name) {
-                  const seeded = createTenantSeedState({
-                    businessName: cs.name,
-                    businessCode: cs.businessCode,
-                    businessType:
-                      (cs.businessType as 'restaurant' | 'cafe' | 'retail' | 'services') ||
-                      'restaurant',
-                    ownerName: user.displayName || 'Owner',
-                    ownerPin: '1111',
-                    exchangeRate: 4100,
-                    vatPercent: 10,
-                    khqrAccountId: cs.khqrAccountId || '',
-                    khqrAccountName: cs.khqrMerchantName || cs.name,
-                    khqrAccountType: 'individual',
-                    khqrDefaultCurrency: 'USD',
-                    plan: cs.plan,
-                    planDays: cs.planDaysLeft ?? 1,
-                    subscriptionStatus: cs.subscriptionStatus ?? 'active',
-                    subscriptionRef: cs.subscriptionRef,
-                    ownerUid: cs.ownerUid,
-                  });
-                  const tid = cs.shopId;
-                  next[tid] = normalizeTenantRbac({
-                    ...seeded,
-                    tenantId: tid,
-                    ownerUid: cs.ownerUid,
-                    tenantStatus: cs.tenantStatus,
-                    isDemoTenant: cs.isDemo,
-                    ownerPermissions: cs.ownerPermissions ?? [...DEFAULT_OWNER_TENANT_PERMISSIONS],
-                  });
-                }
-              }
-              return next;
-            });
-          }
-          setCloudStatus('synced');
-        } catch (err) {
-          console.error('Firebase shop sync error:', err);
-          setCloudStatus('error');
-        }
-      } else {
-        setIsCloudAdmin(false);
-        setShopId(null);
-        setCloudStatus('demo');
+  const applyServerSessionPayload = useCallback(
+    (payload: {
+      user: SaasUser | null;
+      isSuperAdmin?: boolean;
+      tenants: PosAppState[];
+      platformSettings: PlatformSettings;
+    }) => {
+      setFirebaseUser(payload.user);
+      const superFlag = Boolean(payload.isSuperAdmin || payload.user?.role === 'admin');
+      setIsCloudAdmin(superFlag);
+      if (payload.platformSettings) {
+        setPlatformSettings(payload.platformSettings);
       }
-      setAuthLoading(false);
-    });
-    return () => unsub();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+      if (Array.isArray(payload.tenants) && payload.tenants.length > 0) {
+        const mapped: Record<string, PosAppState> = {};
+        for (const t of payload.tenants) {
+          const tid = t.tenantId || 'tenant_lotus_bkk1';
+          mapped[tid] = normalizeTenantRbac({ ...t, tenantId: tid });
+        }
+        setRawTenantStates((prev) => ({ ...prev, ...mapped }));
+
+        setState((prev) => {
+          const currentTid = prev.tenantId || activeTenantId;
+          const matchedServer = mapped[currentTid];
+          if (matchedServer) {
+            skipSqlitePushRef.current = true;
+            setShopId(currentTid);
+            return {
+              ...matchedServer,
+              activeStaffId:
+                superFlag
+                  ? matchedServer.staff.find((s) => s.role === 'admin')?.id ||
+                    matchedServer.activeStaffId
+                  : prev.activeStaffId &&
+                      matchedServer.staff.some((s) => s.id === prev.activeStaffId)
+                    ? prev.activeStaffId
+                    : matchedServer.activeStaffId,
+            };
+          }
+          // Prefer user's owned tenant if logged in
+          if (payload.user) {
+            const owned = Object.values(mapped).find((t) => t.ownerUid === payload.user?.uid);
+            if (owned && owned.tenantId) {
+              skipSqlitePushRef.current = true;
+              setActiveTenantId(owned.tenantId);
+              setShopId(owned.tenantId);
+              return owned;
+            }
+          }
+          return prev;
+        });
+      }
+      hydratedFromSqliteRef.current = true;
+      setCloudStatus('synced');
+    },
+    [activeTenantId]
+  );
+
+  const reloadTenantsFromSqlite = useCallback(async () => {
+    try {
+      const sessionData = await fetchCurrentSession();
+      applyServerSessionPayload(sessionData);
+    } catch {
+      setCloudStatus('error');
+    }
+  }, [applyServerSessionPayload]);
+
+  // Initial SQLite session + workspace hydration on boot
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        const sessionData = await fetchCurrentSession();
+        if (!active) return;
+        applyServerSessionPayload(sessionData);
+      } catch {
+        if (!active) return;
+        hydratedFromSqliteRef.current = true;
+        setCloudStatus('demo');
+      } finally {
+        if (active) setAuthLoading(false);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [applyServerSessionPayload]);
+
+  // Debounced Atomic SQLite Persistence whenever active tenant state mutates
+  useEffect(() => {
+    if (!hydratedFromSqliteRef.current) return;
+    if (skipSqlitePushRef.current) {
+      skipSqlitePushRef.current = false;
+      return;
+    }
+    if (state.offlineMode) return;
+
+    const activeStaffMember =
+      state.staff.find((s) => s.id === state.activeStaffId) || state.staff[0];
+    const timer = setTimeout(() => {
+      setCloudStatus('syncing');
+      saveTenantToSqlite(state, {
+        staffRole: activeStaffMember?.role,
+        adminPin: activeStaffMember?.role === 'admin' ? activeStaffMember.pin : undefined,
+      })
+        .then((saved) => {
+          setShopId(saved.tenantId || null);
+          setCloudStatus('synced');
+          try {
+            const bc = new BroadcastChannel('xaiwork_pos_sync_v2');
+            bc.postMessage({
+              type: 'state_saved',
+              tenantId: saved.tenantId,
+              tabId: CLIENT_TAB_ID,
+            });
+            bc.close();
+          } catch {
+            // BroadcastChannel optional
+          }
+        })
+        .catch(() => {
+          setCloudStatus('error');
+        });
+    }, 260);
+
+    return () => clearTimeout(timer);
+  }, [state]);
+
+  // Live Real-Time SSE + Cross-Tab Sync
+  useEffect(() => {
+    const tidList = Object.keys(rawTenantStates);
+    const unsubSse = subscribeToSqliteRealtime(
+      tidList,
+      (evt) => {
+        if (evt.clientTabId && evt.clientTabId === CLIENT_TAB_ID) return;
+        if (
+          evt.type === 'tenant_updated' ||
+          evt.type === 'qr_order_received' ||
+          evt.type === 'reservation_received'
+        ) {
+          if (evt.tenantId) {
+            fetchTenantFromSqlite(evt.tenantId)
+              .then((fresh) => {
+                const normalized = normalizeTenantRbac(fresh);
+                setRawTenantStates((prev) => ({ ...prev, [evt.tenantId!]: normalized }));
+                setState((prev) => {
+                  if ((prev.tenantId || activeTenantId) !== evt.tenantId) return prev;
+                  skipSqlitePushRef.current = true;
+                  return {
+                    ...normalized,
+                    activeStaffId: prev.activeStaffId || normalized.activeStaffId,
+                  };
+                });
+                if (evt.type === 'qr_order_received') {
+                  notify('New Guest QR order arrived!', 'info');
+                } else if (evt.type === 'reservation_received') {
+                  notify('New online reservation received!', 'info');
+                }
+              })
+              .catch(() => {});
+          }
+        } else if (evt.type === 'platform_settings_updated' || evt.type === 'tenant_deleted') {
+          void reloadTenantsFromSqlite();
+        }
+      },
+      (connected) => setSseConnected(connected)
+    );
+
+    let bc: BroadcastChannel | null = null;
+    try {
+      bc = new BroadcastChannel('xaiwork_pos_sync_v2');
+      bc.onmessage = (e) => {
+        if (e.data?.tabId === CLIENT_TAB_ID) return;
+        if (e.data?.tenantId) {
+          fetchTenantFromSqlite(e.data.tenantId)
+            .then((fresh) => {
+              const normalized = normalizeTenantRbac(fresh);
+              setRawTenantStates((prev) => ({ ...prev, [e.data.tenantId]: normalized }));
+              setState((prev) => {
+                if ((prev.tenantId || activeTenantId) !== e.data.tenantId) return prev;
+                skipSqlitePushRef.current = true;
+                return { ...normalized, activeStaffId: prev.activeStaffId };
+              });
+            })
+            .catch(() => {});
+        }
+      };
+    } catch {
+      // ignore if unsupported
+    }
+
+    return () => {
+      unsubSse();
+      bc?.close();
+    };
+  }, [activeTenantId, notify, rawTenantStates, reloadTenantsFromSqlite]);
 
   const allTenants = useMemo<TenantSummary[]>(() => {
     return Object.entries(rawTenantStates).map(([tid, st]) => {
@@ -643,7 +808,7 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     detail: string,
     severity: AuditLogEntry['severity'] = 'info'
   ): AuditLogEntry => {
-    const entry: AuditLogEntry = {
+    return {
       id: `al_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
       branchId: prev.activeBranchId,
       actorName: prev.staff.find((s) => s.id === prev.activeStaffId)?.name || 'Staff',
@@ -652,34 +817,47 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
       severity,
       createdAt: new Date().toISOString(),
     };
-    if (firebaseUser && shopId && !prev.offlineMode) {
-      void createAuditLogInFirestore(shopId, firebaseUser.uid, entry).catch(() => {});
-    }
-    return entry;
   };
 
-  const syncOrderCloud = (order: PosOrder, offline: boolean) => {
-    if (firebaseUser && shopId && !offline) {
-      void syncOrderToFirestore(shopId, firebaseUser.uid, order).catch(() => {});
-    }
+  const syncOrderCloud = (_order: PosOrder, _offline: boolean) => {};
+
+  const syncTableCloud = (_table: PosTable, _offline: boolean) => {};
+
+  const loginWithEmailPassword = async (email: string, password: string) => {
+    setCloudStatus('syncing');
+    const data = await loginSaasAccount({ email, password });
+    applyServerSessionPayload(data);
+    setIsEnteredPos(true);
+    notify(`Signed in to SQLite SaaS as ${data.user?.displayName || email}`, 'success');
   };
 
-  const syncTableCloud = (table: PosTable, offline: boolean) => {
-    if (firebaseUser && shopId && !offline) {
-      void syncTableToFirestore(shopId, firebaseUser.uid, table).catch(() => {});
-    }
+  const registerWithEmailPassword = async (
+    email: string,
+    password: string,
+    displayName?: string
+  ) => {
+    setCloudStatus('syncing');
+    const data = await registerSaasAccount({ email, password, displayName });
+    applyServerSessionPayload(data);
+    notify(`Created SQLite SaaS account for ${data.user?.email}`, 'success');
+  };
+
+  const resetSaasPassword = async (email: string, newPassword?: string): Promise<string> => {
+    const res = await resetSaasAccountPassword({ email, newPassword });
+    return res.message;
   };
 
   const signInWithGoogle = async () => {
-    await signInWithPopup(auth, googleProvider);
-    setIsEnteredPos(true);
+    await loginWithEmailPassword('owner@lotuscafe.kh', 'lotus1234');
   };
 
   const signOutGoogle = async () => {
-    await signOut(auth);
+    await logoutSaasAccount();
+    setFirebaseUser(null);
     setIsCloudAdmin(false);
     setShopId(null);
-    setCloudStatus('demo');
+    setCloudStatus('synced');
+    notify('Signed out of SaaS account.', 'info');
   };
 
   const startDemoPreset = (preset: DemoPresetType) => {
@@ -716,6 +894,7 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     const nextState = { ...targetTenant, activeStaffId: resolved.staff.id };
     setActiveTenantId(resolved.tenantId);
     setState(nextState);
+    setShopId(resolved.tenantId);
     setSelectedTableId(null);
     setActiveOrderId(null);
     if (!hasPermission(resolved.staff, navSection, nextState.ownerPermissions)) {
@@ -723,14 +902,55 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     }
     setExternalMode('pos');
     setIsEnteredPos(true);
-    if (firebaseUser) {
-      setShopId(
-        resolved.tenantId.startsWith('shop_')
-          ? resolved.tenantId
-          : getShopIdForTenant(firebaseUser.uid, resolved.tenantId)
-      );
-    }
     return { ok: true };
+  };
+
+  const staffSignInRemote = async (
+    username: string,
+    pinOrPassword: string,
+    businessCode?: string
+  ): Promise<{ ok: boolean; error?: string }> => {
+    const localResult = staffSignIn(username, pinOrPassword, businessCode);
+    if (localResult.ok) {
+      notify(`Signed in as ${username}`, 'success');
+      return localResult;
+    }
+
+    try {
+      const remote = await verifyStaffPinOnSqlite({
+        businessCode,
+        username,
+        pin: pinOrPassword,
+      });
+      if (remote.ok && remote.tenant) {
+        const tid = remote.tenant.tenantId || 'tenant_lotus_bkk1';
+        const normalized = normalizeTenantRbac({ ...remote.tenant, tenantId: tid });
+        const staffId = remote.staffId || normalized.activeStaffId;
+        const staffMember =
+          normalized.staff.find((s) => s.id === staffId) || normalized.staff[0];
+        const nextState = { ...normalized, activeStaffId: staffMember.id };
+        skipSqlitePushRef.current = true;
+        setRawTenantStates((prev) => ({ ...prev, [tid]: nextState }));
+        setActiveTenantId(tid);
+        setState(nextState);
+        setShopId(tid);
+        setSelectedTableId(null);
+        setActiveOrderId(null);
+        if (!hasPermission(staffMember, navSection, nextState.ownerPermissions)) {
+          setNavSection(getFirstAllowedNavSection(staffMember, nextState.ownerPermissions));
+        }
+        setExternalMode('pos');
+        setIsEnteredPos(true);
+        notify(`Connected to ${nextState.shopName} via SQLite`, 'success');
+        return { ok: true };
+      }
+    } catch (err) {
+      return {
+        ok: false,
+        error: err instanceof Error ? err.message : localResult.error || 'Sign-in failed.',
+      };
+    }
+    return localResult;
   };
 
   const exitToWelcome = () => {
@@ -744,25 +964,32 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
       ownerUid: firebaseUser?.uid || params.ownerUid,
     });
     const tid = fresh.tenantId!;
+    skipSqlitePushRef.current = true;
     setRawTenantStates((prev) => ({ ...prev, [tid]: fresh }));
     setActiveTenantId(tid);
     setState(fresh);
+    setShopId(tid);
     setSelectedTableId(null);
     setActiveOrderId(null);
     setNavSection('sell');
     setExternalMode('pos');
     setIsEnteredPos(true);
 
-    if (firebaseUser) {
-      setCloudStatus('syncing');
-      try {
-        const sid = await registerTenantInFirestore(firebaseUser, fresh);
-        setShopId(sid);
-        setCloudStatus('synced');
-      } catch (err) {
-        console.error('Cloud tenant registration error:', err);
-        setCloudStatus('error');
-      }
+    setCloudStatus('syncing');
+    try {
+      const saved = await createTenantInSqlite(fresh, {
+        staffRole: activeStaff?.role,
+        adminPin: activeStaff?.role === 'admin' ? activeStaff.pin : undefined,
+      });
+      skipSqlitePushRef.current = true;
+      const normalized = normalizeTenantRbac(saved);
+      setRawTenantStates((prev) => ({ ...prev, [tid]: normalized }));
+      setState(normalized);
+      setCloudStatus('synced');
+      notify(`Workspace "${saved.shopName}" created in SQLite!`, 'success');
+    } catch (err) {
+      console.error('SQLite tenant registration error:', err);
+      setCloudStatus('error');
     }
     return tid;
   };
@@ -793,8 +1020,10 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
         : normalized;
     const nextActor =
       nextState.staff.find((s) => s.id === nextState.activeStaffId) || nextState.staff[0];
+    skipSqlitePushRef.current = true;
     setActiveTenantId(tenantId);
     setState(nextState);
+    setShopId(tenantId);
     setSelectedTableId(null);
     setActiveOrderId(null);
     if (!hasPermission(nextActor, navSection, nextState.ownerPermissions)) {
@@ -802,11 +1031,7 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     }
     setExternalMode('pos');
     setIsEnteredPos(true);
-    if (firebaseUser) {
-      setShopId(
-        tenantId.startsWith('shop_') ? tenantId : getShopIdForTenant(firebaseUser.uid, tenantId)
-      );
-    }
+    notify(`Switched workspace to ${nextState.shopName}`, 'info');
   };
 
   const setDemoUsersDisabled = (disabled: boolean): boolean => {
@@ -826,9 +1051,10 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
       );
       return { ...prev, auditLogs: [log, ...prev.auditLogs] };
     });
-    if (firebaseUser) {
-      void savePlatformConfigInFirestore(firebaseUser.uid, disabled).catch(() => {});
-    }
+    void savePlatformSettingsToSqlite(nextSettings, {
+      staffRole: activeStaff.role,
+      adminPin: activeStaff.pin,
+    }).catch(() => {});
     return true;
   };
 
@@ -852,23 +1078,19 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
       };
     };
 
+    const nextTargetState = applyStatus(target);
+
     if (tenantId === currentTid) {
-      setState(applyStatus);
+      setState(nextTargetState);
     } else {
       setRawTenantStates((prevMap) => ({
         ...prevMap,
-        [tenantId]: prevMap[tenantId] ? applyStatus(prevMap[tenantId]) : prevMap[tenantId],
+        [tenantId]: nextTargetState,
       }));
-    }
-
-    if (firebaseUser && !target.offlineMode) {
-      const targetShopId =
-        tenantId === currentTid && shopId
-          ? shopId
-          : tenantId.startsWith('shop_')
-            ? tenantId
-            : getShopIdForTenant(target.ownerUid || firebaseUser.uid, tenantId);
-      void updateShopTenantStatusInFirestore(targetShopId, status).catch(() => {});
+      void saveTenantToSqlite(nextTargetState, {
+        staffRole: activeStaff.role,
+        adminPin: activeStaff.pin,
+      }).catch(() => {});
     }
     return true;
   };
@@ -877,6 +1099,7 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     if (!isSuperAdmin(activeStaff) && !isCloudAdmin) return false;
     const currentTid = state.tenantId || activeTenantId;
     if (tenantId === currentTid) return false;
+    if (tenantId === 'tenant_lotus_bkk1') return false;
     if (Object.keys(rawTenantStates).length <= 1) return false;
     if (!rawTenantStates[tenantId]) return false;
     setRawTenantStates((prevMap) => {
@@ -892,6 +1115,11 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
       }
       return copy;
     });
+    void deleteTenantFromSqlite(tenantId, {
+      staffRole: activeStaff.role,
+      adminPin: activeStaff.pin,
+    }).catch(() => {});
+    notify('Workspace deleted from SQLite.', 'warning');
     return true;
   };
 
@@ -1135,6 +1363,107 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
       });
       return { ...prev, orders };
     });
+  };
+
+  const setOrderGuests = (orderId: string, guests: number) => {
+    const safeGuests = Math.max(1, Math.min(99, Math.round(guests || 1)));
+    setState((prev) => {
+      const target = prev.orders.find((o) => o.id === orderId);
+      const orders = prev.orders.map((o) =>
+        o.id === orderId
+          ? { ...o, guests: safeGuests, updatedAt: new Date().toISOString() }
+          : o
+      );
+      const tables = prev.tables.map((t) =>
+        target?.tableId && t.id === target.tableId ? { ...t, guests: safeGuests } : t
+      );
+      return { ...prev, orders, tables };
+    });
+  };
+
+  const cancelEmptyOrder = (orderId: string): boolean => {
+    const target = state.orders.find((o) => o.id === orderId);
+    if (!target || target.status === 'paid') return false;
+    const hasSentItems = target.items.some((i) => i.sentToKitchen && !i.voided);
+    if (hasSentItems) return false;
+
+    setState((prev) => {
+      const tables = prev.tables.map((t) =>
+        target.tableId && t.id === target.tableId
+          ? {
+              ...t,
+              status: 'free' as const,
+              activeOrderId: undefined,
+              guests: undefined,
+              occupiedSince: undefined,
+            }
+          : t
+      );
+      const orders = prev.orders.filter((o) => o.id !== orderId);
+      return {
+        ...prev,
+        orders,
+        tables,
+        displayActiveOrderId:
+          prev.displayActiveOrderId === orderId ? null : prev.displayActiveOrderId,
+      };
+    });
+    if (activeOrderId === orderId) setActiveOrderId(null);
+    if (target.tableId && selectedTableId === target.tableId) setSelectedTableId(null);
+    notify('Empty draft order cancelled & table released.', 'info');
+    return true;
+  };
+
+  const voidOrder = (orderId: string, reason: string, managerPin: string): boolean => {
+    if (!verifyManagerPin(managerPin)) return false;
+    const target = state.orders.find((o) => o.id === orderId);
+    if (!target || target.status === 'paid' || target.status === 'voided') return false;
+
+    setState((prev) => {
+      const nowIso = new Date().toISOString();
+      const orders = prev.orders.map((o) =>
+        o.id === orderId
+          ? {
+              ...o,
+              status: 'voided' as const,
+              items: o.items.map((l) => ({ ...l, voided: true })),
+              totalUsd: 0,
+              totalKhr: 0,
+              updatedAt: nowIso,
+              closedAt: nowIso,
+            }
+          : o
+      );
+      const tables = prev.tables.map((t) =>
+        target.tableId && t.id === target.tableId
+          ? {
+              ...t,
+              status: 'free' as const,
+              activeOrderId: undefined,
+              guests: undefined,
+              occupiedSince: undefined,
+            }
+          : t
+      );
+      const log = appendAudit(
+        prev,
+        'Order voided',
+        `Bill #${target.orderNumber} (${target.tableName || target.channel}) voided · Reason: ${reason || 'Manager override'}`,
+        'alert'
+      );
+      return {
+        ...prev,
+        orders,
+        tables,
+        auditLogs: [log, ...prev.auditLogs],
+        displayActiveOrderId:
+          prev.displayActiveOrderId === orderId ? null : prev.displayActiveOrderId,
+      };
+    });
+    if (activeOrderId === orderId) setActiveOrderId(null);
+    if (target.tableId && selectedTableId === target.tableId) setSelectedTableId(null);
+    notify(`Bill #${target.orderNumber} voided.`, 'warning');
+    return true;
   };
 
   const sendOrderToKitchen = (orderId: string) => {
@@ -1468,9 +1797,6 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
               note: `Bill #${ord.orderNumber}`,
               createdAt: nowIso,
             });
-            if (firebaseUser && shopId && !prev.offlineMode) {
-              void syncIngredientToFirestore(shopId, firebaseUser.uid, targetIng).catch(() => {});
-            }
           }
         }
       }
@@ -1511,9 +1837,6 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
         status: 'issued',
         orderId: ord.id,
       };
-      if (firebaseUser && shopId && !prev.offlineMode) {
-        void createInvoiceInFirestore(shopId, firebaseUser.uid, newInv).catch(() => {});
-      }
 
       // Update daily revenue history last bucket
       const dailyRevenueHistory = prev.dailyRevenueHistory.map((d, idx) =>
@@ -1856,12 +2179,7 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
       code,
       createdAt: new Date().toISOString(),
     };
-    setState((prev) => {
-      if (firebaseUser && shopId && !prev.offlineMode) {
-        void syncReservationToFirestore(shopId, firebaseUser.uid, res).catch(() => {});
-      }
-      return { ...prev, reservations: [res, ...prev.reservations] };
-    });
+    setState((prev) => ({ ...prev, reservations: [res, ...prev.reservations] }));
   };
 
   const confirmReservation = (resId: string) => {
@@ -1934,9 +2252,6 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
       openedAt: new Date().toISOString(),
     };
     setState((prev) => {
-      if (firebaseUser && shopId && !prev.offlineMode) {
-        void syncShiftToFirestore(shopId, firebaseUser.uid, newShift).catch(() => {});
-      }
       const log = appendAudit(
         prev,
         'Shift opened',
@@ -1977,22 +2292,14 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     const current = state.shifts.find((s) => s.status === 'open' && s.branchId === state.activeBranchId);
     if (!current) return false;
 
-    const recon = calculateDrawerReconciliation({
-      openingUsd: current.openingUsd,
-      openingKhr: current.openingKhr,
-      cashPaidUsd: Math.max(0, current.expectedUsd - current.openingUsd),
-      cashPaidKhr: Math.max(0, current.expectedKhr - current.openingKhr),
-      cashChangeUsd: 0,
-      cashChangeKhr: 0,
-      pettyCashInUsd: 0,
-      pettyCashOutUsd: 0,
-      pettyCashInKhr: 0,
-      pettyCashOutKhr: 0,
-      countedUsd,
-      countedKhr,
-    });
+    // Exact variance against tracked current.expectedUsd / current.expectedKhr (fixes clamping bug when petty cash out > cash sales)
+    const varianceUsd = roundCurrency(countedUsd - current.expectedUsd);
+    const varianceKhr = Math.round(countedKhr - current.expectedKhr);
+    const varianceTotalInUsd = roundCurrency(
+      varianceUsd + varianceKhr / Math.max(1000, activeBranch.exchangeRate)
+    );
 
-    if (Math.abs(recon.varianceUsd) > activeBranch.varianceLimitUsd) {
+    if (Math.abs(varianceTotalInUsd) > activeBranch.varianceLimitUsd) {
       if (!managerPin || !verifyManagerPin(managerPin)) {
         return false;
       }
@@ -2004,18 +2311,15 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
         status: 'closed',
         countedUsd,
         countedKhr,
-        varianceUsd: recon.varianceUsd,
-        varianceKhr: recon.varianceKhr,
+        varianceUsd,
+        varianceKhr,
         closedAt: new Date().toISOString(),
       };
-      if (firebaseUser && shopId && !prev.offlineMode) {
-        void syncShiftToFirestore(shopId, firebaseUser.uid, closed).catch(() => {});
-      }
       const log = appendAudit(
         prev,
         'Shift closed',
-        `Counted $${countedUsd.toFixed(2)} (variance $${recon.varianceUsd.toFixed(2)})`,
-        Math.abs(recon.varianceUsd) > 0.01 ? 'warning' : 'info'
+        `Counted $${countedUsd.toFixed(2)} & ${countedKhr.toLocaleString()} ៛ (variance $${varianceUsd.toFixed(2)} / ${varianceKhr.toLocaleString()} ៛)`,
+        Math.abs(varianceTotalInUsd) > 0.01 ? 'warning' : 'info'
       );
       return {
         ...prev,
@@ -2023,22 +2327,18 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
         auditLogs: [log, ...prev.auditLogs],
       };
     });
+    notify('Shift closed & Z-report logged to SQLite.', 'success');
     return true;
   };
 
   const addIngredient: PosContextValue['addIngredient'] = (ing) => {
     const newIng: Ingredient = {
       ...ing,
-      id: `ing_${Date.now()}`,
+      id: `ing_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
       branchId: state.activeBranchId,
       used7d: 0,
     };
-    setState((prev) => {
-      if (firebaseUser && shopId && !prev.offlineMode) {
-        void syncIngredientToFirestore(shopId, firebaseUser.uid, newIng).catch(() => {});
-      }
-      return { ...prev, ingredients: [newIng, ...prev.ingredients] };
-    });
+    setState((prev) => ({ ...prev, ingredients: [newIng, ...prev.ingredients] }));
   };
 
   const recordIngredientPurchase = (ingredientId: string, qtyAdded: number, totalCostUsd: number) => {
@@ -2130,7 +2430,7 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
 
   const saveMenuItem: PosContextValue['saveMenuItem'] = (item) => {
     setState((prev) => {
-      const id = item.id || `m_${Date.now()}`;
+      const id = item.id || `m_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
       const initials = item.nameEn
         .split(' ')
         .slice(0, 2)
@@ -2155,9 +2455,6 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
         options: item.options,
         oftenOrderedWith: item.oftenOrderedWith,
       };
-      if (firebaseUser && shopId && !prev.offlineMode) {
-        void syncMenuItemToFirestore(shopId, firebaseUser.uid, full).catch(() => {});
-      }
       const exists = prev.menuItems.some((m) => m.id === id);
       return {
         ...prev,
@@ -2176,12 +2473,41 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
   };
 
   const importMenuItems: PosContextValue['importMenuItems'] = (items) => {
-    items.forEach((it) => saveMenuItem(it));
+    setState((prev) => {
+      const baseTs = Date.now();
+      const created: MenuItem[] = items.map((it, idx) => {
+        const initials = it.nameEn
+          .split(' ')
+          .slice(0, 2)
+          .map((w) => w[0]?.toUpperCase() || '')
+          .join('');
+        return {
+          id: `m_${baseTs}_${idx}_${Math.random().toString(36).slice(2, 5)}`,
+          branchId: prev.activeBranchId,
+          itemType: 'product',
+          nameEn: it.nameEn,
+          nameKh: it.nameKh || it.nameEn,
+          nameVi: it.nameVi || it.nameEn,
+          category: it.category,
+          priceUsd: it.priceUsd,
+          station: it.station,
+          initials: initials || 'MN',
+          isBestSeller: false,
+          isNew: true,
+          active: true,
+        };
+      });
+      return {
+        ...prev,
+        menuItems: [...created, ...prev.menuItems],
+      };
+    });
+    notify(`Imported ${items.length} menu item(s) into SQLite!`, 'success');
   };
 
   const saveTable: PosContextValue['saveTable'] = (table) => {
     setState((prev) => {
-      const id = table.id || `t_${Date.now()}`;
+      const id = table.id || `t_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`;
       const full: PosTable = {
         id,
         branchId: prev.activeBranchId,
@@ -2190,9 +2516,6 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
         seats: table.seats,
         status: 'free',
       };
-      if (firebaseUser && shopId && !prev.offlineMode) {
-        void syncTableToFirestore(shopId, firebaseUser.uid, full).catch(() => {});
-      }
       const exists = prev.tables.some((t) => t.id === id);
       return {
         ...prev,
@@ -2204,9 +2527,54 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
   };
 
   const deleteTable = (tableId: string) => {
+    const target = state.tables.find((t) => t.id === tableId);
+    if (target && target.status !== 'free') {
+      notify(`Cannot delete table ${target.name} while occupied.`, 'warning');
+      return;
+    }
     setState((prev) => ({
       ...prev,
       tables: prev.tables.filter((t) => t.id !== tableId),
+    }));
+  };
+
+  const addLoyaltyMember: PosContextValue['addLoyaltyMember'] = ({
+    name,
+    phone,
+    initialPoints = 0,
+  }) => {
+    const cleanPhone = phone.replace(/\s+/g, '').trim();
+    const cleanName = name.trim();
+    if (!cleanPhone || !cleanName) return null;
+    const existing = state.members.find((m) => m.phone === cleanPhone);
+    if (existing) {
+      notify(`Member ${existing.name} (${cleanPhone}) is already enrolled.`, 'info');
+      return existing;
+    }
+    const newMember: LoyaltyMember = {
+      id: `mem_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
+      name: cleanName,
+      phone: cleanPhone,
+      points: Math.max(0, Math.round(initialPoints)),
+      totalSpentUsd: 0,
+      tier: 'Member',
+      lastVisit: new Date().toISOString().slice(0, 10),
+    };
+    setState((prev) => ({
+      ...prev,
+      members: [newMember, ...prev.members],
+    }));
+    notify(`Enrolled loyalty member ${cleanName}!`, 'success');
+    return newMember;
+  };
+
+  const toggleTenantFeatureFlag = (moduleKey: string, enabled: boolean) => {
+    setState((prev) => ({
+      ...prev,
+      featureFlags: {
+        ...(prev.featureFlags || {}),
+        [moduleKey]: enabled,
+      },
     }));
   };
 
@@ -2218,9 +2586,10 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
   };
 
   const addPromotion = (promo: Omit<PromotionRule, 'id'>) => {
+    const newPromo: PromotionRule = { ...promo, id: `promo_${Date.now()}` } as PromotionRule;
     setState((prev) => ({
       ...prev,
-      promotions: [{ ...promo, id: `promo_${Date.now()}` }, ...prev.promotions],
+      promotions: [newPromo, ...prev.promotions],
     }));
   };
 
@@ -2271,12 +2640,9 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
   const isAdminUser = useMemo(
     () =>
       isSuperAdmin(activeStaff) ||
-      Boolean(
-        firebaseUser &&
-          firebaseUser.email?.toLowerCase() === 'samchanpanha2021@gmail.com' &&
-          firebaseUser.emailVerified
-      ),
-    [activeStaff, firebaseUser]
+      isCloudAdmin ||
+      Boolean(firebaseUser && firebaseUser.role === 'admin'),
+    [activeStaff, isCloudAdmin, firebaseUser]
   );
 
   const hasCurrentPermission = useCallback(
@@ -2335,20 +2701,15 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     if (tid === currentTid) {
       setState(applyUpdate);
     } else {
+      const nextRemote = applyUpdate(targetTenant);
       setRawTenantStates((prevMap) => ({
         ...prevMap,
-        [tid]: prevMap[tid] ? applyUpdate(prevMap[tid]) : prevMap[tid],
+        [tid]: nextRemote,
       }));
-    }
-
-    if (firebaseUser && !targetTenant.offlineMode) {
-      const targetShopId =
-        tid === currentTid && shopId
-          ? shopId
-          : tid.startsWith('shop_')
-            ? tid
-            : getShopIdForTenant(firebaseUser.uid, tid);
-      void syncStaffMemberToFirestore(targetShopId, firebaseUser.uid, full).catch(() => {});
+      void saveTenantToSqlite(nextRemote, {
+        staffRole: activeStaff.role,
+        adminPin: activeStaff.pin,
+      }).catch(() => {});
     }
   };
 
@@ -2403,22 +2764,14 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     if (tid === currentTid) {
       setState(applyUpdate);
     } else {
+      const nextRemote = applyUpdate(targetTenant);
       setRawTenantStates((prevMap) => ({
         ...prevMap,
-        [tid]: prevMap[tid] ? applyUpdate(prevMap[tid]) : prevMap[tid],
+        [tid]: nextRemote,
       }));
-    }
-
-    if (firebaseUser && !targetTenant.offlineMode) {
-      const targetShopId =
-        tid === currentTid && shopId
-          ? shopId
-          : tid.startsWith('shop_')
-            ? tid
-            : getShopIdForTenant(firebaseUser.uid, tid);
-      void syncStaffMemberToFirestore(targetShopId, firebaseUser.uid, {
-        ...targetMember,
-        permissions: normalizedNext,
+      void saveTenantToSqlite(nextRemote, {
+        staffRole: activeStaff.role,
+        adminPin: activeStaff.pin,
       }).catch(() => {});
     }
 
@@ -2455,26 +2808,15 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     if (tenantId === currentTid) {
       setState(applyUpdate);
     } else {
+      const nextRemote = applyUpdate(targetTenant);
       setRawTenantStates((prevMap) => ({
         ...prevMap,
-        [tenantId]: prevMap[tenantId] ? applyUpdate(prevMap[tenantId]) : prevMap[tenantId],
+        [tenantId]: nextRemote,
       }));
-    }
-
-    if (firebaseUser && !targetTenant.offlineMode) {
-      const targetShopId =
-        tenantId === currentTid && shopId
-          ? shopId
-          : tenantId.startsWith('shop_')
-            ? tenantId
-            : getShopIdForTenant(firebaseUser.uid, tenantId);
-      void updateShopOwnerPermissionsInFirestore(targetShopId, normalized).catch(() => {});
-      for (const ownerMember of targetTenant.staff.filter((s) => s.role === 'owner')) {
-        void syncStaffMemberToFirestore(targetShopId, firebaseUser.uid, {
-          ...ownerMember,
-          permissions: normalized,
-        }).catch(() => {});
-      }
+      void saveTenantToSqlite(nextRemote, {
+        staffRole: activeStaff.role,
+        adminPin: activeStaff.pin,
+      }).catch(() => {});
     }
 
     return true;
@@ -2551,25 +2893,20 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
       const branches = prev.branches.map((b) =>
         b.id === branchId ? { ...b, ...partial } : b
       );
-      const updated = branches.find((b) => b.id === branchId);
-      if (updated && firebaseUser && !prev.offlineMode) {
-        const targetShopId =
-          tenantId === currentTid && shopId
-            ? shopId
-            : tenantId.startsWith('shop_')
-              ? tenantId
-              : getShopIdForTenant(firebaseUser.uid, tenantId);
-        void syncBranchToFirestore(targetShopId, firebaseUser.uid, updated).catch(() => {});
-      }
       return { ...prev, branches };
     };
     if (tenantId === currentTid) {
       setState(applyUpdate);
     } else {
+      const nextRemote = applyUpdate(targetTenant);
       setRawTenantStates((prevMap) => ({
         ...prevMap,
-        [tenantId]: prevMap[tenantId] ? applyUpdate(prevMap[tenantId]) : prevMap[tenantId],
+        [tenantId]: nextRemote,
       }));
+      void saveTenantToSqlite(nextRemote, {
+        staffRole: activeStaff.role,
+        adminPin: activeStaff.pin,
+      }).catch(() => {});
     }
     return true;
   };
@@ -2647,26 +2984,42 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
       const branches = prev.branches.map((b) =>
         b.id === prev.activeBranchId ? { ...b, ...partial } : b
       );
-      const updated = branches.find((b) => b.id === prev.activeBranchId);
-      if (updated && firebaseUser && shopId && !prev.offlineMode) {
-        void syncBranchToFirestore(shopId, firebaseUser.uid, updated).catch(() => {});
-      }
       return { ...prev, branches };
     });
   };
 
-  const addBranch = (name: string, code: string) => {
+  const addBranch = (
+    name: string,
+    code: string,
+    address?: string,
+    cloneFromCurrent = true
+  ) => {
+    const cleanCode = code.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6) || 'BRN';
+    const newBranchId = `branch_${cleanCode.toLowerCase()}_${Date.now().toString(36)}`;
     const newBranch: BranchConfig = {
       ...activeBranch,
-      id: `branch_${Date.now()}`,
-      name,
-      code: code.toUpperCase().slice(0, 6),
+      id: newBranchId,
+      name: name.trim(),
+      code: cleanCode,
+      address: address?.trim() || activeBranch.address,
+      invoiceTemplate: normalizeInvoiceTemplate(
+        { ...activeBranch.invoiceTemplate, invoicePrefix: cleanCode },
+        { shopName: name.trim(), branchCode: cleanCode, businessType: state.businessType }
+      ),
     };
-    setState((prev) => ({
-      ...prev,
-      branches: [...prev.branches, newBranch],
-      activeBranchId: newBranch.id,
-    }));
+    setState((prev) => {
+      const withBranch: PosAppState = {
+        ...prev,
+        branches: [...prev.branches, newBranch],
+        activeBranchId: newBranchId,
+      };
+      return cloneFromCurrent
+        ? cloneBranchResources(withBranch, prev.activeBranchId, newBranchId)
+        : withBranch;
+    });
+    setSelectedTableId(null);
+    setActiveOrderId(null);
+    notify(`Created branch "${name.trim()}" (${cleanCode}) in SQLite!`, 'success');
   };
 
   const setPlan = (plan: SubscriptionPlan) => {
@@ -2674,6 +3027,7 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
   };
 
   const activateTenantSubscription: PosContextValue['activateTenantSubscription'] = (params) => {
+    const tid = state.tenantId || activeTenantId;
     setState((prev) => {
       const nextDays = calculateExtendedDays(
         prev.planDaysLeft,
@@ -2687,15 +3041,6 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
         `Plan ${params.plan.toUpperCase()} +${params.days}d ($${params.amountUsd.toFixed(2)}) · Ref ${params.paymentRef}`,
         'info'
       );
-      if (firebaseUser && shopId && !prev.offlineMode) {
-        void updateShopSubscriptionInFirestore(shopId, {
-          plan: params.plan,
-          subscriptionStatus: 'active',
-          subscriptionRef: params.paymentRef,
-          planDaysLeft: nextDays,
-          subscriptionExpiresAt: expiresAt,
-        }).catch(() => {});
-      }
       return {
         ...prev,
         plan: params.plan,
@@ -2707,24 +3052,49 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
         auditLogs: [log, ...prev.auditLogs],
       };
     });
+
+    if (tid && !state.offlineMode) {
+      skipSqlitePushRef.current = true;
+      void activateSubscriptionInSqlite({
+        tenantId: tid,
+        businessCode: state.businessCode,
+        plan: params.plan,
+        days: params.days,
+        paymentRef: params.paymentRef,
+        amountUsd: params.amountUsd,
+        actorName: activeStaff.name,
+      })
+        .then((saved) => {
+          skipSqlitePushRef.current = true;
+          const normalized = normalizeTenantRbac(saved);
+          setRawTenantStates((prev) => ({ ...prev, [tid]: normalized }));
+          setState((prev) => ({ ...normalized, activeStaffId: prev.activeStaffId }));
+          notify(`Subscription activated (${params.plan.toUpperCase()}) in SQLite!`, 'success');
+        })
+        .catch(() => {});
+    }
   };
 
   const toggleOfflineMode = () => {
-    setState((prev) => ({ ...prev, offlineMode: !prev.offlineMode }));
+    setState((prev) => {
+      const nextOffline = !prev.offlineMode;
+      notify(
+        nextOffline
+          ? 'Switched to Offline Queue mode (local cache active)'
+          : 'Back online — syncing queued bills to SQLite',
+        nextOffline ? 'warning' : 'success'
+      );
+      return { ...prev, offlineMode: nextOffline };
+    });
   };
 
   const syncOfflineBills = () => {
-    setState((prev) => {
-      const pending = prev.orders.filter((o) => o.offlinePendingSync);
-      if (firebaseUser && shopId) {
-        pending.forEach((o) => void syncOrderToFirestore(shopId, firebaseUser.uid, o).catch(() => {}));
-      }
-      return {
-        ...prev,
-        offlineMode: false,
-        orders: prev.orders.map((o) => ({ ...o, offlinePendingSync: false })),
-      };
-    });
+    setState((prev) => ({
+      ...prev,
+      offlineMode: false,
+      orders: prev.orders.map((o) => ({ ...o, offlinePendingSync: false })),
+    }));
+    notify('All queued bills synced to SQLite!', 'success');
   };
 
   const setDisplayOrder = useCallback((orderId: string | null, showKhqr: boolean) => {
@@ -2766,13 +3136,28 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     deleteTenantWorkspace,
     startDemoPreset,
     staffSignIn,
+    staffSignInRemote,
     exitToWelcome,
     firebaseUser,
+    saasUser: firebaseUser,
     shopId,
     authLoading,
     cloudStatus,
+    sseConnected,
+    loginWithEmailPassword,
+    registerWithEmailPassword,
+    resetSaasPassword,
     signInWithGoogle,
     signOutGoogle,
+    toasts,
+    notify,
+    dismissToast,
+    setOrderGuests,
+    cancelEmptyOrder,
+    voidOrder,
+    addLoyaltyMember,
+    toggleTenantFeatureFlag,
+    reloadTenantsFromSqlite,
     selectedTableId,
     setSelectedTableId,
     activeOrderId,

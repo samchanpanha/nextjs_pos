@@ -15,6 +15,7 @@ export interface Translations {
   staff: string;
   salesBook: string;
   chain: string;
+  saasHub: string;
   auditLog: string;
   planBilling: string;
   settings: string;
@@ -56,7 +57,8 @@ export const I18N: Record<LanguageCode, Translations> = {
     promotion: 'Promotion',
     staff: 'Staff',
     salesBook: 'Sales book',
-    chain: 'Chain',
+    chain: 'Chain & Tenants',
+    saasHub: 'SQLite & SaaS',
     auditLog: 'Audit log',
     planBilling: 'Plan & billing',
     settings: 'Settings',
@@ -97,6 +99,7 @@ export const I18N: Record<LanguageCode, Translations> = {
     staff: 'បុគ្គលិក',
     salesBook: 'សៀវភៅលក់ VAT',
     chain: 'សាខាទាំងអស់',
+    saasHub: 'មូលដ្ឋានទិន្នន័យ SQLite',
     auditLog: 'កំណត់ត្រាសកម្មភាព',
     planBilling: 'គម្រោង និងការបង់',
     settings: 'ការកំណត់',
@@ -137,6 +140,7 @@ export const I18N: Record<LanguageCode, Translations> = {
     staff: 'Nhân viên',
     salesBook: 'Sổ bán hàng VAT',
     chain: 'Chuỗi chi nhánh',
+    saasHub: 'SQLite & SaaS',
     auditLog: 'Nhật ký kiểm tra',
     planBilling: 'Gói & thanh toán',
     settings: 'Cài đặt',
@@ -181,6 +185,7 @@ export function getNavLabel(section: NavSection, lang: LanguageCode): string {
     staff: t.staff,
     sales_book: t.salesBook,
     chain: t.chain,
+    saas_hub: t.saasHub,
     audit_log: t.auditLog,
     plan_billing: t.planBilling,
     settings: t.settings,
