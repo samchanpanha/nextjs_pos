@@ -6,6 +6,7 @@ import {
 } from '../utils/permissions';
 import type { SubscriptionPlan, SubscriptionStatus } from '../utils/subscription';
 import { createDefaultInvoiceTemplate } from '../utils/invoiceTemplate';
+import { createDefaultChartOfAccounts } from '../utils/accountingEngine';
 
 export type DemoPresetType = 'restaurant' | 'cafe' | 'takeaway';
 
@@ -43,7 +44,7 @@ export function createSeedState(preset: DemoPresetType = 'restaurant'): PosAppSt
       ? 'Kampuchea Express Counter'
       : 'Lotus Café BKK1';
 
-  return {
+  const baseState: PosAppState = {
     tenantId: 'tenant_lotus_bkk1',
     isDemoTenant: true,
     tenantStatus: 'active',
@@ -1495,11 +1496,668 @@ export function createSeedState(preset: DemoPresetType = 'restaurant'): PosAppSt
       { date: '15/11', netSalesUsd: 184.5, bills: 12, guests: 19 },
       { date: '16/11', netSalesUsd: 115.56, bills: 5, guests: 14 },
     ],
+    suppliers: [
+      {
+        id: 'sup_mekong_coffee',
+        branchId: 'all',
+        name: 'Mekong Specialty Coffee Roasters',
+        nameKh: 'មេគង្គ កាហ្វេរ៉ូស្ទ័រ',
+        category: 'Coffee & Tea',
+        contactName: 'Sokchea Meas',
+        phone: '012 889 112',
+        telegram: '@mekongroasters_kh',
+        vattin: 'L001-901234567',
+        paymentTerms: 'net_15',
+        defaultWhtPercent: 0,
+        active: true,
+        createdAt: '2026-10-01T08:00:00Z',
+      },
+      {
+        id: 'sup_pp_fresh',
+        branchId: 'all',
+        name: 'Phnom Penh Fresh Market & Meats Co.',
+        nameKh: 'ក្រុមហ៊ុន បន្លែ និងសាច់ស្រស់ភ្នំពេញ',
+        category: 'Fresh Produce & Meat',
+        contactName: 'Channary Heng',
+        phone: '017 445 220',
+        telegram: '@ppfresh_supply',
+        vattin: 'L001-908877665',
+        paymentTerms: 'net_7',
+        defaultWhtPercent: 0,
+        active: true,
+        createdAt: '2026-10-01T08:00:00Z',
+      },
+      {
+        id: 'sup_angkor_dairy',
+        branchId: 'all',
+        name: 'Angkor Dairy & Beverage Supply',
+        nameKh: 'អង្គរ ផ្គត់ផ្គង់ទឹកដោះគោ និងភេសជ្ជៈ',
+        category: 'Dairy & Beverage',
+        contactName: 'Rithy Phan',
+        phone: '098 221 909',
+        vattin: 'L001-905544332',
+        paymentTerms: 'net_15',
+        defaultWhtPercent: 0,
+        active: true,
+        createdAt: '2026-10-01T08:00:00Z',
+      },
+      {
+        id: 'sup_campack',
+        branchId: 'all',
+        name: 'CamPack Eco Cups & Disposables',
+        nameKh: 'ខេមផេក សម្ភារៈវេចខ្ចប់',
+        category: 'Packaging & Supplies',
+        contactName: 'Vibol Ly',
+        phone: '089 770 310',
+        vattin: 'K002-901100221',
+        paymentTerms: 'cod',
+        defaultWhtPercent: 0,
+        active: true,
+        createdAt: '2026-10-05T08:00:00Z',
+      },
+    ],
+    purchaseOrders: [
+      {
+        id: 'po_seed_1',
+        poNumber: 'PO-2026-0001',
+        branchId: 'branch_bkk1',
+        supplierId: 'sup_mekong_coffee',
+        supplierName: 'Mekong Specialty Coffee Roasters',
+        supplierVattin: 'L001-901234567',
+        status: 'received',
+        paymentStatus: 'paid',
+        orderDate: '2026-11-04',
+        expectedDate: '2026-11-05',
+        dueDate: '2026-11-19',
+        paymentTerms: 'net_15',
+        applyInputVat: true,
+        whtPercent: 0,
+        lines: [
+          {
+            id: 'pol_s1_1',
+            ingredientId: 'ing_coffee',
+            itemName: 'Ratanakiri espresso beans',
+            purchaseUnit: 'kg',
+            baseUnit: 'g',
+            conversionFactor: 1000,
+            orderedQty: 10,
+            receivedQty: 10,
+            unitCostUsd: 14.0,
+            lineTotalUsd: 140.0,
+          },
+        ],
+        subtotalUsd: 140.0,
+        inputVatUsd: 14.0,
+        totalUsd: 154.0,
+        totalKhr: 631400,
+        receivedSubtotalUsd: 140.0,
+        receivedVatUsd: 14.0,
+        receivedTotalUsd: 154.0,
+        paidUsd: 154.0,
+        whtWithheldUsd: 0,
+        balanceDueUsd: 0,
+        grnHistory: [
+          {
+            id: 'grn_s1',
+            grnNumber: 'GRN-0001',
+            receivedAt: '2026-11-05T09:30:00Z',
+            receivedBy: 'Vanna (Quản lý)',
+            supplierInvoiceRef: 'MKR-INV-8821',
+            lines: [
+              {
+                lineId: 'pol_s1_1',
+                ingredientId: 'ing_coffee',
+                itemName: 'Ratanakiri espresso beans',
+                qtyReceivedNow: 10,
+                unitCostUsd: 14.0,
+                lineSubtotalUsd: 140.0,
+              },
+            ],
+            subtotalUsd: 140.0,
+            inputVatUsd: 14.0,
+            totalUsd: 154.0,
+          },
+        ],
+        payments: [
+          {
+            id: 'popay_s1',
+            paidAt: '2026-11-08T14:00:00Z',
+            paidBy: 'Sophea (Chủ quán)',
+            method: 'Bank transfer',
+            grossSettledUsd: 154.0,
+            whtDeductedUsd: 0,
+            cashPaidUsd: 154.0,
+            paymentRef: 'ABA-TX-700412',
+          },
+        ],
+        note: 'Monthly specialty coffee roast batch',
+        createdBy: 'Sophea (Chủ quán)',
+        createdAt: '2026-11-04T08:00:00Z',
+        updatedAt: '2026-11-08T14:00:00Z',
+      },
+      {
+        id: 'po_seed_2',
+        poNumber: 'PO-2026-0002',
+        branchId: 'branch_bkk1',
+        supplierId: 'sup_pp_fresh',
+        supplierName: 'Phnom Penh Fresh Market & Meats Co.',
+        supplierVattin: 'L001-908877665',
+        status: 'received',
+        paymentStatus: 'partial',
+        orderDate: '2026-11-06',
+        expectedDate: '2026-11-07',
+        dueDate: '2026-11-13',
+        paymentTerms: 'net_7',
+        applyInputVat: true,
+        whtPercent: 0,
+        lines: [
+          {
+            id: 'pol_s2_1',
+            ingredientId: 'ing_beef',
+            itemName: 'Beef tenderloin',
+            purchaseUnit: 'kg',
+            baseUnit: 'g',
+            conversionFactor: 1000,
+            orderedQty: 15,
+            receivedQty: 15,
+            unitCostUsd: 9.5,
+            lineTotalUsd: 142.5,
+          },
+          {
+            id: 'pol_s2_2',
+            ingredientId: 'ing_fish',
+            itemName: 'Mekong snakehead fillet',
+            purchaseUnit: 'kg',
+            baseUnit: 'g',
+            conversionFactor: 1000,
+            orderedQty: 10,
+            receivedQty: 10,
+            unitCostUsd: 6.75,
+            lineTotalUsd: 67.5,
+          },
+        ],
+        subtotalUsd: 210.0,
+        inputVatUsd: 21.0,
+        totalUsd: 231.0,
+        totalKhr: 947100,
+        receivedSubtotalUsd: 210.0,
+        receivedVatUsd: 21.0,
+        receivedTotalUsd: 231.0,
+        paidUsd: 100.0,
+        whtWithheldUsd: 0,
+        balanceDueUsd: 131.0,
+        grnHistory: [
+          {
+            id: 'grn_s2',
+            grnNumber: 'GRN-0002',
+            receivedAt: '2026-11-07T07:45:00Z',
+            receivedBy: 'Bopha (Bếp)',
+            supplierInvoiceRef: 'PPF-2026-419',
+            lines: [
+              {
+                lineId: 'pol_s2_1',
+                ingredientId: 'ing_beef',
+                itemName: 'Beef tenderloin',
+                qtyReceivedNow: 15,
+                unitCostUsd: 9.5,
+                lineSubtotalUsd: 142.5,
+              },
+              {
+                lineId: 'pol_s2_2',
+                ingredientId: 'ing_fish',
+                itemName: 'Mekong snakehead fillet',
+                qtyReceivedNow: 10,
+                unitCostUsd: 6.75,
+                lineSubtotalUsd: 67.5,
+              },
+            ],
+            subtotalUsd: 210.0,
+            inputVatUsd: 21.0,
+            totalUsd: 231.0,
+          },
+        ],
+        payments: [
+          {
+            id: 'popay_s2',
+            paidAt: '2026-11-10T11:00:00Z',
+            paidBy: 'Sophea (Chủ quán)',
+            method: 'KHQR',
+            grossSettledUsd: 100.0,
+            whtDeductedUsd: 0,
+            cashPaidUsd: 100.0,
+            paymentRef: 'KHQR-883920',
+          },
+        ],
+        note: 'Weekly meat & fish delivery — $131 balance due',
+        createdBy: 'Vanna (Quản lý)',
+        createdAt: '2026-11-06T10:00:00Z',
+        updatedAt: '2026-11-10T11:00:00Z',
+      },
+      {
+        id: 'po_seed_3',
+        poNumber: 'PO-2026-0003',
+        branchId: 'branch_bkk1',
+        supplierId: 'sup_angkor_dairy',
+        supplierName: 'Angkor Dairy & Beverage Supply',
+        supplierVattin: 'L001-905544332',
+        status: 'sent',
+        paymentStatus: 'unpaid',
+        orderDate: '2026-11-15',
+        expectedDate: '2026-11-17',
+        dueDate: '2026-11-30',
+        paymentTerms: 'net_15',
+        applyInputVat: true,
+        whtPercent: 0,
+        lines: [
+          {
+            id: 'pol_s3_1',
+            ingredientId: 'ing_milk',
+            itemName: 'Condensed & fresh milk',
+            purchaseUnit: 'case (12L)',
+            baseUnit: 'ml',
+            conversionFactor: 12000,
+            orderedQty: 4,
+            receivedQty: 0,
+            unitCostUsd: 18.0,
+            lineTotalUsd: 72.0,
+          },
+        ],
+        subtotalUsd: 72.0,
+        inputVatUsd: 7.2,
+        totalUsd: 79.2,
+        totalKhr: 324700,
+        receivedSubtotalUsd: 0,
+        receivedVatUsd: 0,
+        receivedTotalUsd: 0,
+        paidUsd: 0,
+        whtWithheldUsd: 0,
+        balanceDueUsd: 0,
+        grnHistory: [],
+        payments: [],
+        note: 'Sent to supplier via Telegram — awaiting morning delivery',
+        createdBy: 'Vanna (Quản lý)',
+        createdAt: '2026-11-15T16:30:00Z',
+        updatedAt: '2026-11-15T16:30:00Z',
+      },
+    ],
+    accounts: createDefaultChartOfAccounts(),
+    expenses: [
+      {
+        id: 'exp_seed_rent',
+        voucherNo: 'EXP-0001',
+        branchId: 'branch_bkk1',
+        date: '2026-11-02',
+        expenseAccountCode: '6200',
+        expenseAccountName: 'Shop Rent & Premises Lease',
+        vendorName: 'BKK1 Street 310 Property Landlord',
+        description: 'November 2026 shop premises lease (10% WHT retained)',
+        subtotalUsd: 450.0,
+        applyInputVat: false,
+        inputVatUsd: 0,
+        whtPercent: 10,
+        whtAmountUsd: 45.0,
+        totalUsd: 450.0,
+        cashPaidUsd: 405.0,
+        paymentStatus: 'paid',
+        paymentMethod: 'Bank transfer',
+        paymentRef: 'ABA-RENT-1126',
+        createdBy: 'Sophea (Chủ quán)',
+        createdAt: '2026-11-02T09:00:00Z',
+      },
+      {
+        id: 'exp_seed_payroll',
+        voucherNo: 'EXP-0002',
+        branchId: 'branch_bkk1',
+        date: '2026-11-10',
+        expenseAccountCode: '6100',
+        expenseAccountName: 'Staff Salaries, Wages & NSSF',
+        vendorName: 'Lotus Café Kitchen & Bar Team',
+        description: 'First-half November staff payroll & NSSF contribution',
+        subtotalUsd: 380.0,
+        applyInputVat: false,
+        inputVatUsd: 0,
+        whtPercent: 0,
+        whtAmountUsd: 0,
+        totalUsd: 380.0,
+        cashPaidUsd: 380.0,
+        paymentStatus: 'paid',
+        paymentMethod: 'Bank transfer',
+        paymentRef: 'ABA-PAYROLL-11A',
+        createdBy: 'Sophea (Chủ quán)',
+        createdAt: '2026-11-10T17:00:00Z',
+      },
+      {
+        id: 'exp_seed_edc',
+        voucherNo: 'EXP-0003',
+        branchId: 'branch_bkk1',
+        date: '2026-11-12',
+        expenseAccountCode: '6300',
+        expenseAccountName: 'EDC Electricity, Water & Internet',
+        vendorName: 'Électricité du Cambodge (EDC) & Ezecom',
+        vendorVattin: 'GDT-EDC-001',
+        description: 'Monthly electricity, PPWSA water & fiber internet',
+        subtotalUsd: 120.0,
+        applyInputVat: true,
+        inputVatUsd: 12.0,
+        whtPercent: 0,
+        whtAmountUsd: 0,
+        totalUsd: 132.0,
+        cashPaidUsd: 132.0,
+        paymentStatus: 'paid',
+        paymentMethod: 'KHQR',
+        paymentRef: 'EDC-KHQR-1126',
+        createdBy: 'Vanna (Quản lý)',
+        createdAt: '2026-11-12T10:20:00Z',
+      },
+    ],
+    journalEntries: [
+      {
+        id: 'je_seed_1',
+        entryNo: 'JE-2026-0001',
+        branchId: 'branch_bkk1',
+        date: '2026-11-01',
+        createdAt: '2026-11-01T08:00:00Z',
+        sourceType: 'opening',
+        sourceRef: 'OPEN-2026',
+        description: 'Opening Store Capital, Cash Drawer Float, ABA Bank & Initial Kitchen Stock',
+        exchangeRate: 4100,
+        postedBy: 'Sophea (Chủ quán)',
+        totalDebitUsd: 8450.0,
+        totalCreditUsd: 8450.0,
+        lines: [
+          { id: 'jl_s1_1', accountCode: '1010', accountName: 'Cash on Hand (USD & KHR Drawer)', debitUsd: 650.0, creditUsd: 0, memo: 'Opening register & safe cash' },
+          { id: 'jl_s1_2', accountCode: '1020', accountName: 'Bakong KHQR & ABA Bank Account', debitUsd: 4200.0, creditUsd: 0, memo: 'ABA operating balance' },
+          { id: 'jl_s1_3', accountCode: '1200', accountName: 'Kitchen & Bar Inventory Asset', debitUsd: 600.0, creditUsd: 0, memo: 'Initial food & coffee stock' },
+          { id: 'jl_s1_4', accountCode: '1500', accountName: 'Store Equipment & Leasehold Fit-Out', debitUsd: 3000.0, creditUsd: 0, memo: 'La Marzocco espresso & POS equipment' },
+          { id: 'jl_s1_5', accountCode: '3000', accountName: "Owner's Capital & Opening Equity", debitUsd: 0, creditUsd: 8450.0, memo: 'Owner capital injection' },
+        ],
+      },
+      {
+        id: 'je_seed_2',
+        entryNo: 'JE-2026-0002',
+        branchId: 'branch_bkk1',
+        date: '2026-11-02',
+        createdAt: '2026-11-02T09:00:00Z',
+        sourceType: 'expense_voucher',
+        sourceRef: 'EXP-0001',
+        description: 'Shop Rent & Premises Lease — BKK1 Street 310 Property Landlord (10% WHT)',
+        exchangeRate: 4100,
+        postedBy: 'Sophea (Chủ quán)',
+        totalDebitUsd: 450.0,
+        totalCreditUsd: 450.0,
+        lines: [
+          { id: 'jl_s2_1', accountCode: '6200', accountName: 'Shop Rent & Premises Lease', debitUsd: 450.0, creditUsd: 0, memo: 'November shop rent' },
+          { id: 'jl_s2_2', accountCode: '2150', accountName: 'Withholding Tax (WHT) Payable (GDT)', debitUsd: 0, creditUsd: 45.0, memo: '10% Cambodia rental WHT' },
+          { id: 'jl_s2_3', accountCode: '1020', accountName: 'Bakong KHQR & ABA Bank Account', debitUsd: 0, creditUsd: 405.0, memo: 'ABA-RENT-1126' },
+        ],
+      },
+      {
+        id: 'je_seed_3',
+        entryNo: 'JE-2026-0003',
+        branchId: 'branch_bkk1',
+        date: '2026-11-05',
+        createdAt: '2026-11-05T09:30:00Z',
+        sourceType: 'po_grn',
+        sourceRef: 'PO-2026-0001 / GRN-0001',
+        description: 'Goods Receipt GRN-0001 from Mekong Specialty Coffee Roasters (PO-2026-0001)',
+        exchangeRate: 4100,
+        postedBy: 'Vanna (Quản lý)',
+        totalDebitUsd: 154.0,
+        totalCreditUsd: 154.0,
+        lines: [
+          { id: 'jl_s3_1', accountCode: '1200', accountName: 'Kitchen & Bar Inventory Asset', debitUsd: 140.0, creditUsd: 0, memo: '10kg Ratanakiri beans' },
+          { id: 'jl_s3_2', accountCode: '1300', accountName: 'Input VAT Credit (10% GDT)', debitUsd: 14.0, creditUsd: 0, memo: '10% Input VAT MKR-INV-8821' },
+          { id: 'jl_s3_3', accountCode: '2010', accountName: 'Accounts Payable — Suppliers', debitUsd: 0, creditUsd: 154.0, memo: 'Payable to Mekong Roasters' },
+        ],
+      },
+      {
+        id: 'je_seed_4',
+        entryNo: 'JE-2026-0004',
+        branchId: 'branch_bkk1',
+        date: '2026-11-07',
+        createdAt: '2026-11-07T07:45:00Z',
+        sourceType: 'po_grn',
+        sourceRef: 'PO-2026-0002 / GRN-0002',
+        description: 'Goods Receipt GRN-0002 from Phnom Penh Fresh Market & Meats Co. (PO-2026-0002)',
+        exchangeRate: 4100,
+        postedBy: 'Bopha (Bếp)',
+        totalDebitUsd: 231.0,
+        totalCreditUsd: 231.0,
+        lines: [
+          { id: 'jl_s4_1', accountCode: '1200', accountName: 'Kitchen & Bar Inventory Asset', debitUsd: 210.0, creditUsd: 0, memo: 'Beef & snakehead fillet' },
+          { id: 'jl_s4_2', accountCode: '1300', accountName: 'Input VAT Credit (10% GDT)', debitUsd: 21.0, creditUsd: 0, memo: '10% Input VAT PPF-2026-419' },
+          { id: 'jl_s4_3', accountCode: '2010', accountName: 'Accounts Payable — Suppliers', debitUsd: 0, creditUsd: 231.0, memo: 'Payable to PP Fresh Market' },
+        ],
+      },
+      {
+        id: 'je_seed_5',
+        entryNo: 'JE-2026-0005',
+        branchId: 'branch_bkk1',
+        date: '2026-11-08',
+        createdAt: '2026-11-08T14:00:00Z',
+        sourceType: 'po_payment',
+        sourceRef: 'PO-2026-0001 / ABA-TX-700412',
+        description: 'Vendor Bill Payment to Mekong Specialty Coffee Roasters (PO-2026-0001)',
+        exchangeRate: 4100,
+        postedBy: 'Sophea (Chủ quán)',
+        totalDebitUsd: 154.0,
+        totalCreditUsd: 154.0,
+        lines: [
+          { id: 'jl_s5_1', accountCode: '2010', accountName: 'Accounts Payable — Suppliers', debitUsd: 154.0, creditUsd: 0, memo: 'Settled PO-2026-0001' },
+          { id: 'jl_s5_2', accountCode: '1020', accountName: 'Bakong KHQR & ABA Bank Account', debitUsd: 0, creditUsd: 154.0, memo: 'ABA-TX-700412' },
+        ],
+      },
+      {
+        id: 'je_seed_6',
+        entryNo: 'JE-2026-0006',
+        branchId: 'branch_bkk1',
+        date: '2026-11-10',
+        createdAt: '2026-11-10T11:00:00Z',
+        sourceType: 'po_payment',
+        sourceRef: 'PO-2026-0002 / KHQR-883920',
+        description: 'Partial Vendor Payment to Phnom Penh Fresh Market & Meats Co. (PO-2026-0002)',
+        exchangeRate: 4100,
+        postedBy: 'Sophea (Chủ quán)',
+        totalDebitUsd: 100.0,
+        totalCreditUsd: 100.0,
+        lines: [
+          { id: 'jl_s6_1', accountCode: '2010', accountName: 'Accounts Payable — Suppliers', debitUsd: 100.0, creditUsd: 0, memo: 'Partial settlement PO-2026-0002' },
+          { id: 'jl_s6_2', accountCode: '1020', accountName: 'Bakong KHQR & ABA Bank Account', debitUsd: 0, creditUsd: 100.0, memo: 'KHQR-883920' },
+        ],
+      },
+      {
+        id: 'je_seed_7',
+        entryNo: 'JE-2026-0007',
+        branchId: 'branch_bkk1',
+        date: '2026-11-10',
+        createdAt: '2026-11-10T17:00:00Z',
+        sourceType: 'expense_voucher',
+        sourceRef: 'EXP-0002',
+        description: 'Staff Salaries, Wages & NSSF — First-half November payroll',
+        exchangeRate: 4100,
+        postedBy: 'Sophea (Chủ quán)',
+        totalDebitUsd: 380.0,
+        totalCreditUsd: 380.0,
+        lines: [
+          { id: 'jl_s7_1', accountCode: '6100', accountName: 'Staff Salaries, Wages & NSSF', debitUsd: 380.0, creditUsd: 0, memo: 'Kitchen & barista wages' },
+          { id: 'jl_s7_2', accountCode: '1020', accountName: 'Bakong KHQR & ABA Bank Account', debitUsd: 0, creditUsd: 380.0, memo: 'ABA-PAYROLL-11A' },
+        ],
+      },
+      {
+        id: 'je_seed_8',
+        entryNo: 'JE-2026-0008',
+        branchId: 'branch_bkk1',
+        date: '2026-11-12',
+        createdAt: '2026-11-12T10:20:00Z',
+        sourceType: 'expense_voucher',
+        sourceRef: 'EXP-0003',
+        description: 'EDC Electricity, Water & Internet — Monthly utilities',
+        exchangeRate: 4100,
+        postedBy: 'Vanna (Quản lý)',
+        totalDebitUsd: 132.0,
+        totalCreditUsd: 132.0,
+        lines: [
+          { id: 'jl_s8_1', accountCode: '6300', accountName: 'EDC Electricity, Water & Internet', debitUsd: 120.0, creditUsd: 0, memo: 'Electricity & fiber' },
+          { id: 'jl_s8_2', accountCode: '1300', accountName: 'Input VAT Credit (10% GDT)', debitUsd: 12.0, creditUsd: 0, memo: '10% Input VAT on utility bill' },
+          { id: 'jl_s8_3', accountCode: '1020', accountName: 'Bakong KHQR & ABA Bank Account', debitUsd: 0, creditUsd: 132.0, memo: 'EDC-KHQR-1126' },
+        ],
+      },
+      {
+        id: 'je_seed_9',
+        entryNo: 'JE-2026-0009',
+        branchId: 'branch_bkk1',
+        date: '2026-11-15',
+        createdAt: '2026-11-15T21:30:00Z',
+        sourceType: 'pos_sale',
+        sourceRef: 'POS-NOV01-15',
+        description: 'Consolidated POS Sales & Recipe COGS (Nov 1 – Nov 15 · Cash & Bakong KHQR)',
+        exchangeRate: 4100,
+        postedBy: 'Sokha (Thu ngân)',
+        totalDebitUsd: 2635.3,
+        totalCreditUsd: 2635.3,
+        lines: [
+          { id: 'jl_s9_1', accountCode: '1010', accountName: 'Cash on Hand (USD & KHR Drawer)', debitUsd: 820.0, creditUsd: 0, memo: 'Cash POS takings' },
+          { id: 'jl_s9_2', accountCode: '1020', accountName: 'Bakong KHQR & ABA Bank Account', debitUsd: 1215.0, creditUsd: 0, memo: 'Bakong KHQR & ABA settlements' },
+          { id: 'jl_s9_3', accountCode: '4000', accountName: 'Food & Beverage Sales (Net)', debitUsd: 0, creditUsd: 1850.0, memo: 'Net F&B sales Nov 1–15' },
+          { id: 'jl_s9_4', accountCode: '2100', accountName: 'Output VAT Payable (10% GDT)', debitUsd: 0, creditUsd: 185.0, memo: '10% Output VAT collected' },
+          { id: 'jl_s9_5', accountCode: '5000', accountName: 'Cost of Goods Sold (Recipe Ingredients)', debitUsd: 600.3, creditUsd: 0, memo: 'BOM recipe ingredient consumption' },
+          { id: 'jl_s9_6', accountCode: '1200', accountName: 'Kitchen & Bar Inventory Asset', debitUsd: 0, creditUsd: 600.3, memo: 'Inventory relief for sold dishes' },
+        ],
+      },
+      {
+        id: 'je_seed_10',
+        entryNo: 'JE-2026-0010',
+        branchId: 'branch_bkk1',
+        date: '2026-11-16',
+        createdAt: '2026-11-16T09:15:00Z',
+        sourceType: 'pos_sale',
+        sourceRef: 'ORD-100',
+        description: 'POS Sale #100 (T01) via KHQR',
+        exchangeRate: 4100,
+        postedBy: 'Sokha (Thu ngân)',
+        totalDebitUsd: 17.15,
+        totalCreditUsd: 17.15,
+        lines: [
+          { id: 'jl_s10_1', accountCode: '1020', accountName: 'Bakong KHQR & ABA Bank Account', debitUsd: 13.2, creditUsd: 0, memo: 'KHQR settlement' },
+          { id: 'jl_s10_2', accountCode: '4000', accountName: 'Food & Beverage Sales (Net)', debitUsd: 0, creditUsd: 12.0, memo: 'Order #100 net sales' },
+          { id: 'jl_s10_3', accountCode: '2100', accountName: 'Output VAT Payable (10% GDT)', debitUsd: 0, creditUsd: 1.2, memo: '10% Output VAT' },
+          { id: 'jl_s10_4', accountCode: '5000', accountName: 'Cost of Goods Sold (Recipe Ingredients)', debitUsd: 3.95, creditUsd: 0, memo: 'BOM recipe COGS #100' },
+          { id: 'jl_s10_5', accountCode: '1200', accountName: 'Kitchen & Bar Inventory Asset', debitUsd: 0, creditUsd: 3.95, memo: 'Inventory recipe consumption' },
+        ],
+      },
+    ],
     nextOrderNumber: 106,
     nextInvoiceSeq: 4,
+    nextPoSeq: 4,
+    nextJournalSeq: 11,
     offlineMode: false,
     displayActiveOrderId: 'ord_t02',
     displayShowKhqr: false,
+    featureFlags: {},
+    version: 1,
+  };
+
+  return cloneBranchResources(baseState, 'branch_bkk1', 'branch_rvs');
+}
+
+export function cloneBranchResources(
+  state: PosAppState,
+  sourceBranchId: string,
+  targetBranchId: string,
+  options?: { cloneMenu?: boolean; cloneTables?: boolean; cloneIngredients?: boolean }
+): PosAppState {
+  const cloneMenu = options?.cloneMenu ?? true;
+  const cloneTables = options?.cloneTables ?? true;
+  const cloneIngredients = options?.cloneIngredients ?? true;
+
+  const existingTargetMenu = state.menuItems.some((m) => m.branchId === targetBranchId);
+  const existingTargetTables = state.tables.some((t) => t.branchId === targetBranchId);
+  const existingTargetIngs = state.ingredients.some((i) => i.branchId === targetBranchId);
+
+  const sourceMenu = state.menuItems.filter((m) => m.branchId === sourceBranchId);
+  const sourceTables = state.tables.filter((t) => t.branchId === sourceBranchId);
+  const sourceIngs = state.ingredients.filter((i) => i.branchId === sourceBranchId);
+
+  const menuIdMap = new Map<string, string>();
+  const ingIdMap = new Map<string, string>();
+
+  const newMenuItems =
+    cloneMenu && !existingTargetMenu
+      ? sourceMenu.map((m) => {
+          const newId = `${targetBranchId}_${m.id}`;
+          menuIdMap.set(m.id, newId);
+          return { ...m, id: newId, branchId: targetBranchId };
+        })
+      : [];
+
+  const newTables =
+    cloneTables && !existingTargetTables
+      ? sourceTables.map((t) => ({
+          ...t,
+          id: `${targetBranchId}_${t.id}`,
+          branchId: targetBranchId,
+          status: 'free' as const,
+          activeOrderId: undefined,
+          guests: undefined,
+          occupiedSince: undefined,
+        }))
+      : [];
+
+  const newIngredients =
+    cloneIngredients && !existingTargetIngs
+      ? sourceIngs.map((ing) => {
+          const newId = `${targetBranchId}_${ing.id}`;
+          ingIdMap.set(ing.id, newId);
+          return { ...ing, id: newId, branchId: targetBranchId };
+        })
+      : [];
+
+  const newRecipes =
+    newMenuItems.length > 0 && newIngredients.length > 0
+      ? state.recipes
+          .filter((r) => menuIdMap.has(r.menuItemId))
+          .map((r) => ({
+            menuItemId: menuIdMap.get(r.menuItemId)!,
+            lines: r.lines
+              .filter((l) => ingIdMap.has(l.ingredientId))
+              .map((l) => ({
+                ingredientId: ingIdMap.get(l.ingredientId)!,
+                qtyPerPortion: l.qtyPerPortion,
+              })),
+          }))
+      : [];
+
+  const hasTargetShift = state.shifts.some(
+    (s) => s.branchId === targetBranchId && s.status === 'open'
+  );
+  const newShifts = !hasTargetShift
+    ? [
+        {
+          id: `shift_${targetBranchId}_open`,
+          branchId: targetBranchId,
+          cashierName: state.staff[0]?.name || 'Owner',
+          status: 'open' as const,
+          openingUsd: 50,
+          openingKhr: 200000,
+          countedUsd: 0,
+          countedKhr: 0,
+          expectedUsd: 50,
+          expectedKhr: 200000,
+          varianceUsd: 0,
+          varianceKhr: 0,
+          pettyCash: [],
+          openedAt: new Date().toISOString(),
+        },
+      ]
+    : [];
+
+  return {
+    ...state,
+    menuItems: [...state.menuItems, ...newMenuItems],
+    tables: [...state.tables, ...newTables],
+    ingredients: [...state.ingredients, ...newIngredients],
+    recipes: [...state.recipes, ...newRecipes],
+    shifts: [...state.shifts, ...newShifts],
   };
 }
 
@@ -1766,6 +2424,11 @@ export function createTenantSeedState(params: RegisterTenantParams): PosAppState
     ],
     recipes: [],
     stockHistory: [],
+    suppliers: [],
+    purchaseOrders: [],
+    accounts: createDefaultChartOfAccounts(),
+    journalEntries: [],
+    expenses: [],
     reservations: [],
     promotions: [
       {
@@ -1796,6 +2459,8 @@ export function createTenantSeedState(params: RegisterTenantParams): PosAppState
     dailyRevenueHistory: [{ date: nowIso.slice(5, 10), netSalesUsd: 0, bills: 0, guests: 0 }],
     nextOrderNumber: 1,
     nextInvoiceSeq: 1,
+    nextPoSeq: 1,
+    nextJournalSeq: 1,
     offlineMode: false,
     displayActiveOrderId: null,
     displayShowKhqr: false,

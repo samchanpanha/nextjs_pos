@@ -3,6 +3,8 @@ import type { PermissionKey } from '../utils/permissions';
 import type { SubscriptionPlan, SubscriptionStatus } from '../utils/subscription';
 import type { InvoiceTemplateConfig } from '../utils/invoiceTemplate';
 
+export type { OrderLineItem, PromotionRule };
+
 export type LanguageCode = 'en' | 'kh' | 'vi';
 
 export type NavSection =
@@ -15,11 +17,14 @@ export type NavSection =
   | 'reports'
   | 'menu_prices'
   | 'stock'
+  | 'purchase_orders'
   | 'tables_areas'
   | 'promotion'
+  | 'accounting'
   | 'staff'
   | 'sales_book'
   | 'chain'
+  | 'saas_hub'
   | 'audit_log'
   | 'plan_billing'
   | 'settings';
@@ -34,6 +39,43 @@ export interface PlatformSettings {
   demoUsersDisabled: boolean;
   updatedAt?: string;
   updatedBy?: string;
+  maintenanceBanner?: string;
+}
+
+export interface SaasUser {
+  uid: string;
+  email: string;
+  displayName: string;
+  role: 'admin' | 'owner' | 'staff';
+  emailVerified: boolean;
+  createdAt?: string;
+}
+
+export interface SqliteEngineStats {
+  engine: string;
+  sqliteVersion: string;
+  journalMode: string;
+  dbPath: string;
+  dbSizeBytes: number;
+  tableCounts: Record<string, number>;
+  totalTenants: number;
+  activeTenants: number;
+  suspendedTenants: number;
+  demoTenants: number;
+  totalOrders: number;
+  paidOrdersGmvUsd: number;
+  subscriptionRevenueUsd: number;
+  recentSubscriptions: {
+    id: string;
+    tenantId: string;
+    tenantName: string;
+    plan: SubscriptionPlan;
+    daysGranted: number;
+    amountUsd: number;
+    paymentRef: string;
+    createdAt: string;
+  }[];
+  checkedAt: string;
 }
 
 export interface StaffMember {
@@ -164,6 +206,8 @@ export type OrderChannel =
 
 export type OrderStatus = 'open' | 'sent' | 'cooking' | 'ready' | 'served' | 'paid' | 'voided';
 
+export type PaymentMethod = 'Cash' | 'KHQR' | 'Bank transfer' | 'Card' | 'Split';
+
 export interface PosOrder {
   id: string;
   branchId: string;
@@ -186,13 +230,15 @@ export interface PosOrder {
   prepaidCustomerPackId?: string;
   depositAppliedUsd: number;
   reservationId?: string;
+  vatUsd?: number;
+  serviceChargeUsd?: number;
   totalUsd: number;
   totalKhr: number;
   paidUsd: number;
   paidKhr: number;
   changeUsd: number;
   changeKhr: number;
-  paymentMethod?: 'Cash' | 'KHQR' | 'Bank transfer' | 'Card' | 'Split';
+  paymentMethod?: PaymentMethod;
   paymentRef?: string;
   cashierName: string;
   createdAt: string;
@@ -385,11 +431,213 @@ export interface GroupOrderSession {
   createdAt: string;
 }
 
+export type SupplierPaymentTerms = 'cod' | 'net_7' | 'net_15' | 'net_30';
+
+export interface Supplier {
+  id: string;
+  branchId: string;
+  name: string;
+  nameKh?: string;
+  category: string;
+  contactName: string;
+  phone: string;
+  email?: string;
+  telegram?: string;
+  vattin?: string;
+  paymentTerms: SupplierPaymentTerms;
+  defaultWhtPercent?: number;
+  notes?: string;
+  active: boolean;
+  createdAt: string;
+}
+
+export type PurchaseOrderStatus = 'draft' | 'sent' | 'partial' | 'received' | 'cancelled';
+export type PurchaseOrderPaymentStatus = 'unpaid' | 'partial' | 'paid';
+
+export interface PurchaseOrderLine {
+  id: string;
+  ingredientId?: string;
+  itemName: string;
+  purchaseUnit: string;
+  baseUnit: string;
+  conversionFactor: number;
+  orderedQty: number;
+  receivedQty: number;
+  unitCostUsd: number;
+  lineTotalUsd: number;
+}
+
+export interface PurchaseOrderGrnRecord {
+  id: string;
+  grnNumber: string;
+  receivedAt: string;
+  receivedBy: string;
+  supplierInvoiceRef?: string;
+  note?: string;
+  lines: {
+    lineId: string;
+    ingredientId?: string;
+    itemName: string;
+    qtyReceivedNow: number;
+    unitCostUsd: number;
+    lineSubtotalUsd: number;
+  }[];
+  subtotalUsd: number;
+  inputVatUsd: number;
+  totalUsd: number;
+}
+
+export interface PurchaseOrderPaymentRecord {
+  id: string;
+  paidAt: string;
+  paidBy: string;
+  method: PaymentMethod;
+  grossSettledUsd: number;
+  whtDeductedUsd: number;
+  cashPaidUsd: number;
+  paymentRef: string;
+  note?: string;
+}
+
+export interface PurchaseOrder {
+  id: string;
+  poNumber: string;
+  branchId: string;
+  supplierId: string;
+  supplierName: string;
+  supplierVattin?: string;
+  status: PurchaseOrderStatus;
+  paymentStatus: PurchaseOrderPaymentStatus;
+  orderDate: string;
+  expectedDate: string;
+  dueDate: string;
+  paymentTerms: SupplierPaymentTerms;
+  applyInputVat: boolean;
+  whtPercent: number;
+  lines: PurchaseOrderLine[];
+  subtotalUsd: number;
+  inputVatUsd: number;
+  totalUsd: number;
+  totalKhr: number;
+  receivedSubtotalUsd: number;
+  receivedVatUsd: number;
+  receivedTotalUsd: number;
+  paidUsd: number;
+  whtWithheldUsd: number;
+  balanceDueUsd: number;
+  grnHistory: PurchaseOrderGrnRecord[];
+  payments: PurchaseOrderPaymentRecord[];
+  note?: string;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type AccountType = 'asset' | 'liability' | 'equity' | 'revenue' | 'cogs' | 'expense';
+
+export type AccountSubType =
+  | 'cash_bank'
+  | 'receivable'
+  | 'inventory'
+  | 'tax_asset'
+  | 'fixed_asset'
+  | 'payable'
+  | 'tax_liability'
+  | 'unearned_revenue'
+  | 'owner_equity'
+  | 'retained_earnings'
+  | 'operating_revenue'
+  | 'other_revenue'
+  | 'direct_cogs'
+  | 'waste_cogs'
+  | 'payroll_expense'
+  | 'occupancy_expense'
+  | 'operating_expense';
+
+export interface LedgerAccount {
+  id: string;
+  code: string;
+  nameEn: string;
+  nameKh: string;
+  type: AccountType;
+  subType: AccountSubType;
+  normalBalance: 'debit' | 'credit';
+  systemAccount: boolean;
+  active: boolean;
+  description?: string;
+}
+
+export type JournalSourceType =
+  | 'opening'
+  | 'pos_sale'
+  | 'pos_refund'
+  | 'shift_cash'
+  | 'inventory_purchase'
+  | 'inventory_waste'
+  | 'po_grn'
+  | 'po_payment'
+  | 'expense_voucher'
+  | 'prepaid_pack'
+  | 'manual'
+  | 'reversal';
+
+export interface JournalLine {
+  id: string;
+  accountCode: string;
+  accountName: string;
+  debitUsd: number;
+  creditUsd: number;
+  memo?: string;
+}
+
+export interface JournalEntry {
+  id: string;
+  entryNo: string;
+  branchId: string;
+  date: string;
+  createdAt: string;
+  sourceType: JournalSourceType;
+  sourceRef?: string;
+  description: string;
+  lines: JournalLine[];
+  totalDebitUsd: number;
+  totalCreditUsd: number;
+  exchangeRate: number;
+  postedBy: string;
+  reversed?: boolean;
+  reversesEntryId?: string;
+}
+
+export interface OperatingExpense {
+  id: string;
+  voucherNo: string;
+  branchId: string;
+  date: string;
+  expenseAccountCode: string;
+  expenseAccountName: string;
+  vendorName: string;
+  vendorVattin?: string;
+  description: string;
+  subtotalUsd: number;
+  applyInputVat: boolean;
+  inputVatUsd: number;
+  whtPercent: number;
+  whtAmountUsd: number;
+  totalUsd: number;
+  cashPaidUsd: number;
+  paymentStatus: 'paid' | 'payable';
+  paymentMethod?: PaymentMethod;
+  paymentRef?: string;
+  createdBy: string;
+  createdAt: string;
+}
+
 export interface PosAppState {
   tenantId?: string;
   ownerUid?: string;
   isDemoTenant?: boolean;
   tenantStatus?: TenantStatus;
+  storeDataRedactedForAdmin?: boolean;
   shopName: string;
   businessCode: string;
   businessType?: TenantBusinessType;
@@ -413,6 +661,11 @@ export interface PosAppState {
   ingredients: Ingredient[];
   recipes: Recipe[];
   stockHistory: StockHistoryEntry[];
+  suppliers?: Supplier[];
+  purchaseOrders?: PurchaseOrder[];
+  accounts?: LedgerAccount[];
+  journalEntries?: JournalEntry[];
+  expenses?: OperatingExpense[];
   reservations: Reservation[];
   promotions: PromotionRule[];
   prepaidTemplates: PrepaidPackTemplate[];
@@ -424,7 +677,19 @@ export interface PosAppState {
   dailyRevenueHistory: { date: string; netSalesUsd: number; bills: number; guests: number }[];
   nextOrderNumber: number;
   nextInvoiceSeq: number;
+  nextPoSeq?: number;
+  nextJournalSeq?: number;
   offlineMode: boolean;
   displayActiveOrderId: string | null;
   displayShowKhqr: boolean;
+  featureFlags?: Record<string, boolean>;
+  version?: number;
 }
+
+export type Order = PosOrder;
+export type Promotion = PromotionRule;
+export type LoyaltyMember = MemberCustomer;
+export type CustomerPack = CustomerPrepaidPack;
+export type StockMovement = StockHistoryEntry;
+export type RecipeLine = { ingredientId: string; qtyPerPortion: number };
+export type DailyRevenuePoint = { date: string; netSalesUsd: number; bills: number; guests: number };

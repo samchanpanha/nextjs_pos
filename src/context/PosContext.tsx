@@ -1,29 +1,30 @@
-import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
-import { onAuthStateChanged, signInWithPopup, signOut, type User } from 'firebase/auth';
-import { auth, googleProvider } from '../lib/firebase';
+import React, {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import {
-  createAuditLogInFirestore,
-  createInvoiceInFirestore,
-  ensureAdminInFirestore,
-  ensureUserAndShop,
-  fetchPlatformConfigFromFirestore,
-  getShopIdForTenant,
-  listUserShopsFromFirestore,
-  registerTenantInFirestore,
-  savePlatformConfigInFirestore,
-  syncBranchToFirestore,
-  syncIngredientToFirestore,
-  syncMenuItemToFirestore,
-  syncOrderToFirestore,
-  syncReservationToFirestore,
-  syncShiftToFirestore,
-  syncStaffMemberToFirestore,
-  syncTableToFirestore,
-  updateShopOwnerPermissionsInFirestore,
-  updateShopSubscriptionInFirestore,
-  updateShopTenantStatusInFirestore,
-} from '../lib/firestoreSync';
+  CLIENT_TAB_ID,
+  activateSubscriptionInSqlite,
+  createTenantInSqlite,
+  deleteTenantFromSqlite,
+  fetchCurrentSession,
+  fetchTenantFromSqlite,
+  loginSaasAccount,
+  logoutSaasAccount,
+  registerSaasAccount,
+  resetSaasAccountPassword,
+  savePlatformSettingsToSqlite,
+  saveTenantToSqlite,
+  subscribeToSqliteRealtime,
+  verifyStaffPinOnSqlite,
+} from '../lib/sqliteClient';
 import {
+  cloneBranchResources,
   createSeedState,
   createTenantSeedState,
   type DemoPresetType,
@@ -34,34 +35,64 @@ import type {
   BranchConfig,
   ExternalMode,
   Ingredient,
+  JournalEntry,
   LanguageCode,
+  LedgerAccount,
+  LoyaltyMember,
   MenuItem,
   NavSection,
+  OperatingExpense,
+  Order,
   OrderChannel,
+  OrderLineItem,
+  PaymentMethod,
   PettyCashEntry,
   PlatformSettings,
   PosAppState,
-  PosOrder,
   PosTable,
   PrepaidPackTemplate,
+  Promotion,
+  PurchaseOrder,
+  PurchaseOrderLine,
+  PurchaseOrderPaymentRecord,
   QrIncomingOrder,
   Reservation,
+  SaasUser,
   ShiftRecord,
   StaffMember,
+  Supplier,
+  SupplierPaymentTerms,
   TenantStatus,
   TenantSummary,
   VatInvoice,
 } from '../types/pos';
 import {
+  buildInventoryDirectJournal,
+  buildOperatingExpenseJournal,
+  buildPoGrnJournal,
+  buildPoPaymentJournal,
+  buildPosOrderSaleJournal,
+  buildPosRefundJournal,
+  buildPrepaidPackSaleJournal,
+  buildReversalJournal,
+  buildShiftCashJournal,
+  computeDueDateFromTerms,
+  computeLowStockAutoDraftPos,
+  createDefaultChartOfAccounts,
+  finalizeBalancedJournal,
+  resolveAccountName,
+} from '../utils/accountingEngine';
+import {
   calculateDrawerReconciliation,
   calculateOrderTotals,
   roundCurrency,
   usdToKhr,
-  type OrderLineItem,
-  type PromotionRule,
 } from '../utils/posMath';
+type PosOrder = Order;
+type PromotionRule = Promotion;
 import {
   ALL_PERMISSIONS,
+  canAccessNavSection,
   canAssignRole,
   canEditSettings,
   canGrantPermission,
@@ -126,13 +157,36 @@ interface PosContextValue {
     pinOrPassword: string,
     businessCode?: string
   ) => { ok: boolean; error?: string };
+  staffSignInRemote: (
+    username: string,
+    pinOrPassword: string,
+    businessCode?: string
+  ) => Promise<{ ok: boolean; error?: string }>;
   exitToWelcome: () => void;
-  firebaseUser: User | null;
+  firebaseUser: SaasUser | null;
+  saasUser: SaasUser | null;
   shopId: string | null;
   authLoading: boolean;
   cloudStatus: 'demo' | 'synced' | 'syncing' | 'error';
+  sseConnected: boolean;
+  loginWithEmailPassword: (email: string, password: string) => Promise<void>;
+  registerWithEmailPassword: (
+    email: string,
+    password: string,
+    displayName?: string
+  ) => Promise<void>;
+  resetSaasPassword: (email: string, newPassword?: string) => Promise<string>;
   signInWithGoogle: () => Promise<void>;
   signOutGoogle: () => Promise<void>;
+  toasts: { id: string; message: string; tone: 'success' | 'info' | 'warning' | 'error' }[];
+  notify: (message: string, tone?: 'success' | 'info' | 'warning' | 'error') => void;
+  dismissToast: (id: string) => void;
+  setOrderGuests: (orderId: string, guests: number) => void;
+  cancelEmptyOrder: (orderId: string) => boolean;
+  voidOrder: (orderId: string, reason: string, managerPin: string) => boolean;
+  addLoyaltyMember: (params: { name: string; phone: string; initialPoints?: number }) => LoyaltyMember | null;
+  toggleTenantFeatureFlag: (moduleKey: string, enabled: boolean) => void;
+  reloadTenantsFromSqlite: () => Promise<void>;
   selectedTableId: string | null;
   setSelectedTableId: (tableId: string | null) => void;
   activeOrderId: string | null;
@@ -242,7 +296,7 @@ interface PosContextValue {
   issueTaxInvoice: (invoiceId: string, buyerName: string, buyerVattin: string) => void;
   createCreditNote: (invoiceId: string) => void;
   updateBranchSettings: (partial: Partial<BranchConfig>) => void;
-  addBranch: (name: string, code: string) => void;
+  addBranch: (name: string, code: string, address?: string, cloneFromCurrent?: boolean) => void;
   setPlan: (plan: SubscriptionPlan) => void;
   activateTenantSubscription: (params: {
     plan: SubscriptionPlan;
@@ -254,9 +308,94 @@ interface PosContextValue {
   syncOfflineBills: () => void;
   setDisplayOrder: (orderId: string | null, showKhqr: boolean) => void;
   resetDemoData: () => void;
+
+  // Purchase Orders & Suppliers (Procurement)
+  saveSupplier: (supplier: Omit<Supplier, 'id' | 'createdAt'> & { id?: string }) => void;
+  deleteSupplier: (supplierId: string) => void;
+  createPurchaseOrder: (params: {
+    supplierId: string;
+    orderDate: string;
+    expectedDate: string;
+    paymentTerms: SupplierPaymentTerms;
+    applyInputVat: boolean;
+    whtPercent?: number;
+    status?: 'draft' | 'sent';
+    note?: string;
+    lines: Omit<PurchaseOrderLine, 'id' | 'receivedQty' | 'lineTotalUsd'>[];
+  }) => PurchaseOrder | null;
+  autoDraftLowStockPurchaseOrders: () => number;
+  updatePurchaseOrderStatus: (poId: string, status: 'sent' | 'cancelled') => void;
+  receivePurchaseOrder: (params: {
+    poId: string;
+    supplierInvoiceRef?: string;
+    note?: string;
+    lines: { lineId: string; qtyReceivedNow: number; unitCostUsd: number }[];
+  }) => boolean;
+  payPurchaseOrder: (params: {
+    poId: string;
+    method: PaymentMethod;
+    grossSettledUsd: number;
+    whtPercent?: number;
+    paymentRef: string;
+    note?: string;
+  }) => boolean;
+
+  // Accounting & Double-Entry General Ledger
+  saveLedgerAccount: (
+    account: Omit<LedgerAccount, 'id' | 'systemAccount'> & { id?: string }
+  ) => void;
+  recordOperatingExpense: (params: {
+    date: string;
+    expenseAccountCode: string;
+    vendorName: string;
+    vendorVattin?: string;
+    description: string;
+    subtotalUsd: number;
+    applyInputVat: boolean;
+    whtPercent: number;
+    paymentStatus: 'paid' | 'payable';
+    paymentMethod?: PaymentMethod;
+    paymentRef?: string;
+  }) => OperatingExpense | null;
+  postManualJournalEntry: (params: {
+    date: string;
+    sourceRef?: string;
+    description: string;
+    lines: { accountCode: string; debitUsd: number; creditUsd: number; memo?: string }[];
+  }) => boolean;
+  reverseJournalEntry: (entryId: string, reason?: string) => boolean;
 }
 
 const PosContext = createContext<PosContextValue | null>(null);
+
+function redactClientStoreDataForAdmin(st: PosAppState): PosAppState {
+  return {
+    ...st,
+    storeDataRedactedForAdmin: true,
+    menuItems: [],
+    tables: [],
+    orders: [],
+    qrQueue: [],
+    shifts: [],
+    ingredients: [],
+    recipes: [],
+    stockHistory: [],
+    suppliers: [],
+    purchaseOrders: [],
+    accounts: [],
+    journalEntries: [],
+    expenses: [],
+    reservations: [],
+    promotions: [],
+    prepaidTemplates: [],
+    customerPacks: [],
+    members: [],
+    invoices: [],
+    groupSessions: [],
+    dailyRevenueHistory: [],
+    displayActiveOrderId: null,
+  };
+}
 
 function normalizeTenantRbac(st: PosAppState): PosAppState {
   const ownerPermissions = Array.isArray(st.ownerPermissions)
@@ -427,11 +566,33 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
   const [activeOrderId, setActiveOrderId] = useState<string | null>(null);
   const [receiptOrder, setReceiptOrder] = useState<PosOrder | null>(null);
 
-  const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
+  const [firebaseUser, setFirebaseUser] = useState<SaasUser | null>(null);
   const [isCloudAdmin, setIsCloudAdmin] = useState<boolean>(false);
   const [shopId, setShopId] = useState<string | null>(null);
   const [authLoading, setAuthLoading] = useState<boolean>(true);
-  const [cloudStatus, setCloudStatus] = useState<'demo' | 'synced' | 'syncing' | 'error'>('demo');
+  const [cloudStatus, setCloudStatus] = useState<'demo' | 'synced' | 'syncing' | 'error'>('synced');
+  const [sseConnected, setSseConnected] = useState<boolean>(false);
+  const [toasts, setToasts] = useState<
+    { id: string; message: string; tone: 'success' | 'info' | 'warning' | 'error' }[]
+  >([]);
+
+  const skipSqlitePushRef = useRef<boolean>(true);
+  const hydratedFromSqliteRef = useRef<boolean>(false);
+
+  const dismissToast = useCallback((id: string) => {
+    setToasts((prev) => prev.filter((t) => t.id !== id));
+  }, []);
+
+  const notify = useCallback(
+    (message: string, tone: 'success' | 'info' | 'warning' | 'error' = 'info') => {
+      const id = `toast_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+      setToasts((prev) => [...prev.slice(-3), { id, message, tone }]);
+      setTimeout(() => {
+        setToasts((prev) => prev.filter((t) => t.id !== id));
+      }, 3600);
+    },
+    []
+  );
 
   useEffect(() => {
     try {
@@ -441,110 +602,225 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     }
   }, [platformSettings]);
 
+  // Debounced localStorage write (prevents blocking UI thread on large catalog clicks)
   useEffect(() => {
     const tid = state.tenantId || activeTenantId;
-    setRawTenantStates((prev) => {
-      const nextMap = { ...prev, [tid]: state };
+    setRawTenantStates((prev) => ({ ...prev, [tid]: state }));
+
+    const timer = setTimeout(() => {
       try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-        localStorage.setItem(
-          TENANTS_STORAGE_KEY,
-          JSON.stringify({ activeTenantId: tid, states: nextMap })
-        );
+        setRawTenantStates((curr) => {
+          localStorage.setItem(
+            TENANTS_STORAGE_KEY,
+            JSON.stringify({ activeTenantId: tid, states: curr })
+          );
+          return curr;
+        });
       } catch {
         // ignore storage quota errors
       }
-      return nextMap;
-    });
+    }, 180);
+
+    return () => clearTimeout(timer);
   }, [state, activeTenantId]);
 
-  useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async (user) => {
-      setFirebaseUser(user);
-      if (user) {
-        setCloudStatus('syncing');
-        try {
-          const cloudAdminFlag = await ensureAdminInFirestore(user);
-          setIsCloudAdmin(cloudAdminFlag);
-          const sid = await ensureUserAndShop(user, state);
-          setShopId(sid);
-          const remotePlatform = await fetchPlatformConfigFromFirestore().catch(() => null);
-          if (remotePlatform) {
-            setPlatformSettings((prev) => ({ ...prev, ...remotePlatform }));
-          }
-          if (cloudAdminFlag) {
-            setState((prev) => {
-              const adminAccount = prev.staff.find((s) => s.role === 'admin');
-              return adminAccount ? { ...prev, activeStaffId: adminAccount.id } : prev;
-            });
-          }
-          // Discover any additional registered cloud tenants for this user (or all tenants for Super Admin)
-          const cloudShops = await listUserShopsFromFirestore(user.uid, cloudAdminFlag);
-          if (cloudShops.length > 0) {
-            setRawTenantStates((prev) => {
-              const next = { ...prev };
-              for (const cs of cloudShops) {
-                const existingKey = Object.keys(next).find(
-                  (k) => next[k].businessCode.toUpperCase() === cs.businessCode.toUpperCase()
-                );
-                if (existingKey) {
-                  next[existingKey] = normalizeTenantRbac({
-                    ...next[existingKey],
-                    ownerUid: cs.ownerUid,
-                    tenantStatus: cs.tenantStatus,
-                    isDemoTenant: cs.isDemo,
-                    ownerPermissions: cs.ownerPermissions ?? next[existingKey].ownerPermissions,
-                  });
-                } else if (cs.name) {
-                  const seeded = createTenantSeedState({
-                    businessName: cs.name,
-                    businessCode: cs.businessCode,
-                    businessType:
-                      (cs.businessType as 'restaurant' | 'cafe' | 'retail' | 'services') ||
-                      'restaurant',
-                    ownerName: user.displayName || 'Owner',
-                    ownerPin: '1111',
-                    exchangeRate: 4100,
-                    vatPercent: 10,
-                    khqrAccountId: cs.khqrAccountId || '',
-                    khqrAccountName: cs.khqrMerchantName || cs.name,
-                    khqrAccountType: 'individual',
-                    khqrDefaultCurrency: 'USD',
-                    plan: cs.plan,
-                    planDays: cs.planDaysLeft ?? 1,
-                    subscriptionStatus: cs.subscriptionStatus ?? 'active',
-                    subscriptionRef: cs.subscriptionRef,
-                    ownerUid: cs.ownerUid,
-                  });
-                  const tid = cs.shopId;
-                  next[tid] = normalizeTenantRbac({
-                    ...seeded,
-                    tenantId: tid,
-                    ownerUid: cs.ownerUid,
-                    tenantStatus: cs.tenantStatus,
-                    isDemoTenant: cs.isDemo,
-                    ownerPermissions: cs.ownerPermissions ?? [...DEFAULT_OWNER_TENANT_PERMISSIONS],
-                  });
-                }
-              }
-              return next;
-            });
-          }
-          setCloudStatus('synced');
-        } catch (err) {
-          console.error('Firebase shop sync error:', err);
-          setCloudStatus('error');
-        }
-      } else {
-        setIsCloudAdmin(false);
-        setShopId(null);
-        setCloudStatus('demo');
+  const applyServerSessionPayload = useCallback(
+    (payload: {
+      user: SaasUser | null;
+      isSuperAdmin?: boolean;
+      tenants: PosAppState[];
+      platformSettings: PlatformSettings;
+    }) => {
+      setFirebaseUser(payload.user);
+      const superFlag = Boolean(payload.isSuperAdmin || payload.user?.role === 'admin');
+      setIsCloudAdmin(superFlag);
+      if (payload.platformSettings) {
+        setPlatformSettings(payload.platformSettings);
       }
-      setAuthLoading(false);
-    });
-    return () => unsub();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+      if (Array.isArray(payload.tenants) && payload.tenants.length > 0) {
+        const mapped: Record<string, PosAppState> = {};
+        for (const t of payload.tenants) {
+          const tid = t.tenantId || 'tenant_lotus_bkk1';
+          mapped[tid] = normalizeTenantRbac({ ...t, tenantId: tid });
+        }
+        setRawTenantStates((prev) => ({ ...prev, ...mapped }));
+
+        setState((prev) => {
+          const currentTid = prev.tenantId || activeTenantId;
+          const matchedServer = mapped[currentTid];
+          if (matchedServer) {
+            skipSqlitePushRef.current = true;
+            setShopId(currentTid);
+            return {
+              ...matchedServer,
+              activeStaffId:
+                superFlag
+                  ? matchedServer.staff.find((s) => s.role === 'admin')?.id ||
+                    matchedServer.activeStaffId
+                  : prev.activeStaffId &&
+                      matchedServer.staff.some((s) => s.id === prev.activeStaffId)
+                    ? prev.activeStaffId
+                    : matchedServer.activeStaffId,
+            };
+          }
+          // Prefer user's owned tenant if logged in
+          if (payload.user) {
+            const owned = Object.values(mapped).find((t) => t.ownerUid === payload.user?.uid);
+            if (owned && owned.tenantId) {
+              skipSqlitePushRef.current = true;
+              setActiveTenantId(owned.tenantId);
+              setShopId(owned.tenantId);
+              return owned;
+            }
+          }
+          return prev;
+        });
+      }
+      hydratedFromSqliteRef.current = true;
+      setCloudStatus('synced');
+    },
+    [activeTenantId]
+  );
+
+  const reloadTenantsFromSqlite = useCallback(async () => {
+    try {
+      const sessionData = await fetchCurrentSession();
+      applyServerSessionPayload(sessionData);
+    } catch {
+      setCloudStatus('error');
+    }
+  }, [applyServerSessionPayload]);
+
+  // Initial SQLite session + workspace hydration on boot
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        const sessionData = await fetchCurrentSession();
+        if (!active) return;
+        applyServerSessionPayload(sessionData);
+      } catch {
+        if (!active) return;
+        hydratedFromSqliteRef.current = true;
+        setCloudStatus('demo');
+      } finally {
+        if (active) setAuthLoading(false);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [applyServerSessionPayload]);
+
+  // Debounced Atomic SQLite Persistence whenever active tenant state mutates
+  useEffect(() => {
+    if (!hydratedFromSqliteRef.current) return;
+    if (skipSqlitePushRef.current) {
+      skipSqlitePushRef.current = false;
+      return;
+    }
+    if (state.offlineMode) return;
+
+    const activeStaffMember =
+      state.staff.find((s) => s.id === state.activeStaffId) || state.staff[0];
+    const timer = setTimeout(() => {
+      setCloudStatus('syncing');
+      saveTenantToSqlite(state, {
+        staffRole: activeStaffMember?.role,
+        adminPin: activeStaffMember?.role === 'admin' ? activeStaffMember.pin : undefined,
+      })
+        .then((saved) => {
+          setShopId(saved.tenantId || null);
+          setCloudStatus('synced');
+          try {
+            const bc = new BroadcastChannel('xaiwork_pos_sync_v2');
+            bc.postMessage({
+              type: 'state_saved',
+              tenantId: saved.tenantId,
+              tabId: CLIENT_TAB_ID,
+            });
+            bc.close();
+          } catch {
+            // BroadcastChannel optional
+          }
+        })
+        .catch(() => {
+          setCloudStatus('error');
+        });
+    }, 260);
+
+    return () => clearTimeout(timer);
+  }, [state]);
+
+  // Live Real-Time SSE + Cross-Tab Sync
+  useEffect(() => {
+    const tidList = Object.keys(rawTenantStates);
+    const unsubSse = subscribeToSqliteRealtime(
+      tidList,
+      (evt) => {
+        if (evt.clientTabId && evt.clientTabId === CLIENT_TAB_ID) return;
+        if (
+          evt.type === 'tenant_updated' ||
+          evt.type === 'qr_order_received' ||
+          evt.type === 'reservation_received'
+        ) {
+          if (evt.tenantId) {
+            fetchTenantFromSqlite(evt.tenantId)
+              .then((fresh) => {
+                const normalized = normalizeTenantRbac(fresh);
+                setRawTenantStates((prev) => ({ ...prev, [evt.tenantId!]: normalized }));
+                setState((prev) => {
+                  if ((prev.tenantId || activeTenantId) !== evt.tenantId) return prev;
+                  skipSqlitePushRef.current = true;
+                  return {
+                    ...normalized,
+                    activeStaffId: prev.activeStaffId || normalized.activeStaffId,
+                  };
+                });
+                if (evt.type === 'qr_order_received') {
+                  notify('New Guest QR order arrived!', 'info');
+                } else if (evt.type === 'reservation_received') {
+                  notify('New online reservation received!', 'info');
+                }
+              })
+              .catch(() => {});
+          }
+        } else if (evt.type === 'platform_settings_updated' || evt.type === 'tenant_deleted') {
+          void reloadTenantsFromSqlite();
+        }
+      },
+      (connected) => setSseConnected(connected)
+    );
+
+    let bc: BroadcastChannel | null = null;
+    try {
+      bc = new BroadcastChannel('xaiwork_pos_sync_v2');
+      bc.onmessage = (e) => {
+        if (e.data?.tabId === CLIENT_TAB_ID) return;
+        if (e.data?.tenantId) {
+          fetchTenantFromSqlite(e.data.tenantId)
+            .then((fresh) => {
+              const normalized = normalizeTenantRbac(fresh);
+              setRawTenantStates((prev) => ({ ...prev, [e.data.tenantId]: normalized }));
+              setState((prev) => {
+                if ((prev.tenantId || activeTenantId) !== e.data.tenantId) return prev;
+                skipSqlitePushRef.current = true;
+                return { ...normalized, activeStaffId: prev.activeStaffId };
+              });
+            })
+            .catch(() => {});
+        }
+      };
+    } catch {
+      // ignore if unsupported
+    }
+
+    return () => {
+      unsubSse();
+      bc?.close();
+    };
+  }, [activeTenantId, notify, rawTenantStates, reloadTenantsFromSqlite]);
 
   const allTenants = useMemo<TenantSummary[]>(() => {
     return Object.entries(rawTenantStates).map(([tid, st]) => {
@@ -634,8 +910,12 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     if (!check.ok) {
       setIsEnteredPos(false);
       setExternalMode('pos');
+      return;
     }
-  }, [isEnteredPos, activeStaff, state, platformSettings]);
+    if (!canAccessNavSection(activeStaff, navSection, state.ownerPermissions)) {
+      setNavSection(getFirstAllowedNavSection(activeStaff, state.ownerPermissions));
+    }
+  }, [isEnteredPos, activeStaff, state, platformSettings, navSection]);
 
   const appendAudit = (
     prev: PosAppState,
@@ -643,7 +923,7 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     detail: string,
     severity: AuditLogEntry['severity'] = 'info'
   ): AuditLogEntry => {
-    const entry: AuditLogEntry = {
+    return {
       id: `al_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
       branchId: prev.activeBranchId,
       actorName: prev.staff.find((s) => s.id === prev.activeStaffId)?.name || 'Staff',
@@ -652,34 +932,47 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
       severity,
       createdAt: new Date().toISOString(),
     };
-    if (firebaseUser && shopId && !prev.offlineMode) {
-      void createAuditLogInFirestore(shopId, firebaseUser.uid, entry).catch(() => {});
-    }
-    return entry;
   };
 
-  const syncOrderCloud = (order: PosOrder, offline: boolean) => {
-    if (firebaseUser && shopId && !offline) {
-      void syncOrderToFirestore(shopId, firebaseUser.uid, order).catch(() => {});
-    }
+  const syncOrderCloud = (_order: PosOrder, _offline: boolean) => {};
+
+  const syncTableCloud = (_table: PosTable, _offline: boolean) => {};
+
+  const loginWithEmailPassword = async (email: string, password: string) => {
+    setCloudStatus('syncing');
+    const data = await loginSaasAccount({ email, password });
+    applyServerSessionPayload(data);
+    setIsEnteredPos(true);
+    notify(`Signed in to SQLite SaaS as ${data.user?.displayName || email}`, 'success');
   };
 
-  const syncTableCloud = (table: PosTable, offline: boolean) => {
-    if (firebaseUser && shopId && !offline) {
-      void syncTableToFirestore(shopId, firebaseUser.uid, table).catch(() => {});
-    }
+  const registerWithEmailPassword = async (
+    email: string,
+    password: string,
+    displayName?: string
+  ) => {
+    setCloudStatus('syncing');
+    const data = await registerSaasAccount({ email, password, displayName });
+    applyServerSessionPayload(data);
+    notify(`Created SQLite SaaS account for ${data.user?.email}`, 'success');
+  };
+
+  const resetSaasPassword = async (email: string, newPassword?: string): Promise<string> => {
+    const res = await resetSaasAccountPassword({ email, newPassword });
+    return res.message;
   };
 
   const signInWithGoogle = async () => {
-    await signInWithPopup(auth, googleProvider);
-    setIsEnteredPos(true);
+    await loginWithEmailPassword('owner@lotuscafe.kh', 'lotus1234');
   };
 
   const signOutGoogle = async () => {
-    await signOut(auth);
+    await logoutSaasAccount();
+    setFirebaseUser(null);
     setIsCloudAdmin(false);
     setShopId(null);
-    setCloudStatus('demo');
+    setCloudStatus('synced');
+    notify('Signed out of SaaS account.', 'info');
   };
 
   const startDemoPreset = (preset: DemoPresetType) => {
@@ -713,24 +1006,79 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     }
 
     const targetTenant = normalizeTenantRbac(mergedMap[resolved.tenantId]);
-    const nextState = { ...targetTenant, activeStaffId: resolved.staff.id };
+    const baseState =
+      resolved.staff.role === 'admin'
+        ? redactClientStoreDataForAdmin(targetTenant)
+        : targetTenant;
+    const nextState = { ...baseState, activeStaffId: resolved.staff.id };
+    if (resolved.staff.role === 'admin') {
+      skipSqlitePushRef.current = true;
+    }
     setActiveTenantId(resolved.tenantId);
     setState(nextState);
+    setShopId(resolved.tenantId);
     setSelectedTableId(null);
     setActiveOrderId(null);
-    if (!hasPermission(resolved.staff, navSection, nextState.ownerPermissions)) {
+    if (!canAccessNavSection(resolved.staff, navSection, nextState.ownerPermissions)) {
       setNavSection(getFirstAllowedNavSection(resolved.staff, nextState.ownerPermissions));
     }
     setExternalMode('pos');
     setIsEnteredPos(true);
-    if (firebaseUser) {
-      setShopId(
-        resolved.tenantId.startsWith('shop_')
-          ? resolved.tenantId
-          : getShopIdForTenant(firebaseUser.uid, resolved.tenantId)
-      );
-    }
     return { ok: true };
+  };
+
+  const staffSignInRemote = async (
+    username: string,
+    pinOrPassword: string,
+    businessCode?: string
+  ): Promise<{ ok: boolean; error?: string }> => {
+    try {
+      const remote = await verifyStaffPinOnSqlite({
+        businessCode,
+        username,
+        pin: pinOrPassword,
+      });
+      if (remote.ok && remote.tenant) {
+        const tid = remote.tenant.tenantId || 'tenant_lotus_bkk1';
+        const normalized = normalizeTenantRbac({ ...remote.tenant, tenantId: tid });
+        const staffId = remote.staffId || normalized.activeStaffId;
+        const staffMember =
+          normalized.staff.find((s) => s.id === staffId) || normalized.staff[0];
+        const nextState = {
+          ...(staffMember.role === 'admin'
+            ? redactClientStoreDataForAdmin(normalized)
+            : normalized),
+          activeStaffId: staffMember.id,
+        };
+        skipSqlitePushRef.current = true;
+        setRawTenantStates((prev) => ({ ...prev, [tid]: nextState }));
+        setActiveTenantId(tid);
+        setState(nextState);
+        setShopId(tid);
+        setSelectedTableId(null);
+        setActiveOrderId(null);
+        if (!canAccessNavSection(staffMember, navSection, nextState.ownerPermissions)) {
+          setNavSection(getFirstAllowedNavSection(staffMember, nextState.ownerPermissions));
+        }
+        setExternalMode('pos');
+        setIsEnteredPos(true);
+        notify(
+          staffMember.role === 'admin'
+            ? 'Signed in as SaaS Platform Super Admin (Store Data Disabled)'
+            : `Connected to ${nextState.shopName} via SQLite`,
+          'success'
+        );
+        return { ok: true };
+      }
+    } catch {
+      // Fallback to local state when offline
+    }
+
+    const localResult = staffSignIn(username, pinOrPassword, businessCode);
+    if (localResult.ok) {
+      notify(`Signed in as ${username}`, 'success');
+    }
+    return localResult;
   };
 
   const exitToWelcome = () => {
@@ -744,25 +1092,32 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
       ownerUid: firebaseUser?.uid || params.ownerUid,
     });
     const tid = fresh.tenantId!;
+    skipSqlitePushRef.current = true;
     setRawTenantStates((prev) => ({ ...prev, [tid]: fresh }));
     setActiveTenantId(tid);
     setState(fresh);
+    setShopId(tid);
     setSelectedTableId(null);
     setActiveOrderId(null);
     setNavSection('sell');
     setExternalMode('pos');
     setIsEnteredPos(true);
 
-    if (firebaseUser) {
-      setCloudStatus('syncing');
-      try {
-        const sid = await registerTenantInFirestore(firebaseUser, fresh);
-        setShopId(sid);
-        setCloudStatus('synced');
-      } catch (err) {
-        console.error('Cloud tenant registration error:', err);
-        setCloudStatus('error');
-      }
+    setCloudStatus('syncing');
+    try {
+      const saved = await createTenantInSqlite(fresh, {
+        staffRole: activeStaff?.role,
+        adminPin: activeStaff?.role === 'admin' ? activeStaff.pin : undefined,
+      });
+      skipSqlitePushRef.current = true;
+      const normalized = normalizeTenantRbac(saved);
+      setRawTenantStates((prev) => ({ ...prev, [tid]: normalized }));
+      setState(normalized);
+      setCloudStatus('synced');
+      notify(`Workspace "${saved.shopName}" created in SQLite!`, 'success');
+    } catch (err) {
+      console.error('SQLite tenant registration error:', err);
+      setCloudStatus('error');
     }
     return tid;
   };
@@ -793,8 +1148,10 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
         : normalized;
     const nextActor =
       nextState.staff.find((s) => s.id === nextState.activeStaffId) || nextState.staff[0];
+    skipSqlitePushRef.current = true;
     setActiveTenantId(tenantId);
     setState(nextState);
+    setShopId(tenantId);
     setSelectedTableId(null);
     setActiveOrderId(null);
     if (!hasPermission(nextActor, navSection, nextState.ownerPermissions)) {
@@ -802,11 +1159,7 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     }
     setExternalMode('pos');
     setIsEnteredPos(true);
-    if (firebaseUser) {
-      setShopId(
-        tenantId.startsWith('shop_') ? tenantId : getShopIdForTenant(firebaseUser.uid, tenantId)
-      );
-    }
+    notify(`Switched workspace to ${nextState.shopName}`, 'info');
   };
 
   const setDemoUsersDisabled = (disabled: boolean): boolean => {
@@ -826,9 +1179,10 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
       );
       return { ...prev, auditLogs: [log, ...prev.auditLogs] };
     });
-    if (firebaseUser) {
-      void savePlatformConfigInFirestore(firebaseUser.uid, disabled).catch(() => {});
-    }
+    void savePlatformSettingsToSqlite(nextSettings, {
+      staffRole: activeStaff.role,
+      adminPin: activeStaff.pin,
+    }).catch(() => {});
     return true;
   };
 
@@ -852,23 +1206,19 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
       };
     };
 
+    const nextTargetState = applyStatus(target);
+
     if (tenantId === currentTid) {
-      setState(applyStatus);
+      setState(nextTargetState);
     } else {
       setRawTenantStates((prevMap) => ({
         ...prevMap,
-        [tenantId]: prevMap[tenantId] ? applyStatus(prevMap[tenantId]) : prevMap[tenantId],
+        [tenantId]: nextTargetState,
       }));
-    }
-
-    if (firebaseUser && !target.offlineMode) {
-      const targetShopId =
-        tenantId === currentTid && shopId
-          ? shopId
-          : tenantId.startsWith('shop_')
-            ? tenantId
-            : getShopIdForTenant(target.ownerUid || firebaseUser.uid, tenantId);
-      void updateShopTenantStatusInFirestore(targetShopId, status).catch(() => {});
+      void saveTenantToSqlite(nextTargetState, {
+        staffRole: activeStaff.role,
+        adminPin: activeStaff.pin,
+      }).catch(() => {});
     }
     return true;
   };
@@ -877,6 +1227,7 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     if (!isSuperAdmin(activeStaff) && !isCloudAdmin) return false;
     const currentTid = state.tenantId || activeTenantId;
     if (tenantId === currentTid) return false;
+    if (tenantId === 'tenant_lotus_bkk1') return false;
     if (Object.keys(rawTenantStates).length <= 1) return false;
     if (!rawTenantStates[tenantId]) return false;
     setRawTenantStates((prevMap) => {
@@ -892,6 +1243,11 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
       }
       return copy;
     });
+    void deleteTenantFromSqlite(tenantId, {
+      staffRole: activeStaff.role,
+      adminPin: activeStaff.pin,
+    }).catch(() => {});
+    notify('Workspace deleted from SQLite.', 'warning');
     return true;
   };
 
@@ -1135,6 +1491,107 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
       });
       return { ...prev, orders };
     });
+  };
+
+  const setOrderGuests = (orderId: string, guests: number) => {
+    const safeGuests = Math.max(1, Math.min(99, Math.round(guests || 1)));
+    setState((prev) => {
+      const target = prev.orders.find((o) => o.id === orderId);
+      const orders = prev.orders.map((o) =>
+        o.id === orderId
+          ? { ...o, guests: safeGuests, updatedAt: new Date().toISOString() }
+          : o
+      );
+      const tables = prev.tables.map((t) =>
+        target?.tableId && t.id === target.tableId ? { ...t, guests: safeGuests } : t
+      );
+      return { ...prev, orders, tables };
+    });
+  };
+
+  const cancelEmptyOrder = (orderId: string): boolean => {
+    const target = state.orders.find((o) => o.id === orderId);
+    if (!target || target.status === 'paid') return false;
+    const hasSentItems = target.items.some((i) => i.sentToKitchen && !i.voided);
+    if (hasSentItems) return false;
+
+    setState((prev) => {
+      const tables = prev.tables.map((t) =>
+        target.tableId && t.id === target.tableId
+          ? {
+              ...t,
+              status: 'free' as const,
+              activeOrderId: undefined,
+              guests: undefined,
+              occupiedSince: undefined,
+            }
+          : t
+      );
+      const orders = prev.orders.filter((o) => o.id !== orderId);
+      return {
+        ...prev,
+        orders,
+        tables,
+        displayActiveOrderId:
+          prev.displayActiveOrderId === orderId ? null : prev.displayActiveOrderId,
+      };
+    });
+    if (activeOrderId === orderId) setActiveOrderId(null);
+    if (target.tableId && selectedTableId === target.tableId) setSelectedTableId(null);
+    notify('Empty draft order cancelled & table released.', 'info');
+    return true;
+  };
+
+  const voidOrder = (orderId: string, reason: string, managerPin: string): boolean => {
+    if (!verifyManagerPin(managerPin)) return false;
+    const target = state.orders.find((o) => o.id === orderId);
+    if (!target || target.status === 'paid' || target.status === 'voided') return false;
+
+    setState((prev) => {
+      const nowIso = new Date().toISOString();
+      const orders = prev.orders.map((o) =>
+        o.id === orderId
+          ? {
+              ...o,
+              status: 'voided' as const,
+              items: o.items.map((l) => ({ ...l, voided: true })),
+              totalUsd: 0,
+              totalKhr: 0,
+              updatedAt: nowIso,
+              closedAt: nowIso,
+            }
+          : o
+      );
+      const tables = prev.tables.map((t) =>
+        target.tableId && t.id === target.tableId
+          ? {
+              ...t,
+              status: 'free' as const,
+              activeOrderId: undefined,
+              guests: undefined,
+              occupiedSince: undefined,
+            }
+          : t
+      );
+      const log = appendAudit(
+        prev,
+        'Order voided',
+        `Bill #${target.orderNumber} (${target.tableName || target.channel}) voided · Reason: ${reason || 'Manager override'}`,
+        'alert'
+      );
+      return {
+        ...prev,
+        orders,
+        tables,
+        auditLogs: [log, ...prev.auditLogs],
+        displayActiveOrderId:
+          prev.displayActiveOrderId === orderId ? null : prev.displayActiveOrderId,
+      };
+    });
+    if (activeOrderId === orderId) setActiveOrderId(null);
+    if (target.tableId && selectedTableId === target.tableId) setSelectedTableId(null);
+    notify(`Bill #${target.orderNumber} voided.`, 'warning');
+    return true;
   };
 
   const sendOrderToKitchen = (orderId: string) => {
@@ -1468,9 +1925,6 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
               note: `Bill #${ord.orderNumber}`,
               createdAt: nowIso,
             });
-            if (firebaseUser && shopId && !prev.offlineMode) {
-              void syncIngredientToFirestore(shopId, firebaseUser.uid, targetIng).catch(() => {});
-            }
           }
         }
       }
@@ -1511,9 +1965,6 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
         status: 'issued',
         orderId: ord.id,
       };
-      if (firebaseUser && shopId && !prev.offlineMode) {
-        void createInvoiceInFirestore(shopId, firebaseUser.uid, newInv).catch(() => {});
-      }
 
       // Update daily revenue history last bucket
       const dailyRevenueHistory = prev.dailyRevenueHistory.map((d, idx) =>
@@ -1538,6 +1989,37 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
         };
       });
 
+      // Automated Double-Entry General Ledger posting (Sales + Output VAT + Recipe COGS)
+      const coa =
+        prev.accounts && prev.accounts.length > 0
+          ? prev.accounts
+          : createDefaultChartOfAccounts();
+      const jeSeq = prev.nextJournalSeq || (prev.journalEntries?.length || 0) + 1;
+      const orderWithTax: PosOrder = {
+        ...updatedOrder,
+        vatUsd: vatAmt,
+      };
+      let nextJournalEntries = prev.journalEntries || [];
+      let nextJournalSeq = jeSeq;
+      try {
+        const saleJe = buildPosOrderSaleJournal({
+          entryNo: `JE-2026-${String(jeSeq).padStart(4, '0')}`,
+          order: orderWithTax,
+          accounts: coa,
+          recipes: prev.recipes,
+          ingredients: prev.ingredients,
+          exchangeRate: branch.exchangeRate,
+          postedBy: activeStaff.name,
+          date: nowIso.slice(0, 10),
+        });
+        if (saleJe) {
+          nextJournalEntries = [saleJe, ...nextJournalEntries];
+          nextJournalSeq = jeSeq + 1;
+        }
+      } catch {
+        // Keep POS settlement non-blocking
+      }
+
       return {
         ...prev,
         orders: prev.orders.map((o) => (o.id === orderId ? updatedOrder : o)),
@@ -1548,6 +2030,9 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
         members,
         invoices: [newInv, ...prev.invoices],
         nextInvoiceSeq: prev.nextInvoiceSeq + 1,
+        accounts: coa,
+        journalEntries: nextJournalEntries,
+        nextJournalSeq,
         dailyRevenueHistory,
         shifts,
         displayActiveOrderId: null,
@@ -1856,12 +2341,7 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
       code,
       createdAt: new Date().toISOString(),
     };
-    setState((prev) => {
-      if (firebaseUser && shopId && !prev.offlineMode) {
-        void syncReservationToFirestore(shopId, firebaseUser.uid, res).catch(() => {});
-      }
-      return { ...prev, reservations: [res, ...prev.reservations] };
-    });
+    setState((prev) => ({ ...prev, reservations: [res, ...prev.reservations] }));
   };
 
   const confirmReservation = (resId: string) => {
@@ -1934,9 +2414,6 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
       openedAt: new Date().toISOString(),
     };
     setState((prev) => {
-      if (firebaseUser && shopId && !prev.offlineMode) {
-        void syncShiftToFirestore(shopId, firebaseUser.uid, newShift).catch(() => {});
-      }
       const log = appendAudit(
         prev,
         'Shift opened',
@@ -1969,7 +2446,36 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
           pettyCash: [fullEntry, ...s.pettyCash],
         };
       });
-      return { ...prev, shifts };
+      const branch = prev.branches.find((b) => b.id === prev.activeBranchId) || prev.branches[0];
+      const coa =
+        prev.accounts && prev.accounts.length > 0
+          ? prev.accounts
+          : createDefaultChartOfAccounts();
+      const jeSeq = prev.nextJournalSeq || (prev.journalEntries?.length || 0) + 1;
+      const amtInUsd =
+        entry.currency === 'USD'
+          ? entry.amount
+          : roundCurrency(entry.amount / Math.max(1000, branch?.exchangeRate || 4100));
+      const cashJe = buildShiftCashJournal({
+        entryNo: `JE-2026-${String(jeSeq).padStart(4, '0')}`,
+        branchId: prev.activeBranchId,
+        kind: entry.type === 'in' ? 'cash_in' : 'cash_out',
+        amountUsd: amtInUsd,
+        reason: entry.note || 'Petty cash adjustment',
+        accounts: coa,
+        exchangeRate: branch?.exchangeRate || 4100,
+        postedBy: activeStaff.name,
+      });
+
+      return {
+        ...prev,
+        shifts,
+        accounts: coa,
+        journalEntries: cashJe
+          ? [cashJe, ...(prev.journalEntries || [])]
+          : (prev.journalEntries || []),
+        nextJournalSeq: cashJe ? jeSeq + 1 : jeSeq,
+      };
     });
   };
 
@@ -1977,22 +2483,14 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     const current = state.shifts.find((s) => s.status === 'open' && s.branchId === state.activeBranchId);
     if (!current) return false;
 
-    const recon = calculateDrawerReconciliation({
-      openingUsd: current.openingUsd,
-      openingKhr: current.openingKhr,
-      cashPaidUsd: Math.max(0, current.expectedUsd - current.openingUsd),
-      cashPaidKhr: Math.max(0, current.expectedKhr - current.openingKhr),
-      cashChangeUsd: 0,
-      cashChangeKhr: 0,
-      pettyCashInUsd: 0,
-      pettyCashOutUsd: 0,
-      pettyCashInKhr: 0,
-      pettyCashOutKhr: 0,
-      countedUsd,
-      countedKhr,
-    });
+    // Exact variance against tracked current.expectedUsd / current.expectedKhr (fixes clamping bug when petty cash out > cash sales)
+    const varianceUsd = roundCurrency(countedUsd - current.expectedUsd);
+    const varianceKhr = Math.round(countedKhr - current.expectedKhr);
+    const varianceTotalInUsd = roundCurrency(
+      varianceUsd + varianceKhr / Math.max(1000, activeBranch.exchangeRate)
+    );
 
-    if (Math.abs(recon.varianceUsd) > activeBranch.varianceLimitUsd) {
+    if (Math.abs(varianceTotalInUsd) > activeBranch.varianceLimitUsd) {
       if (!managerPin || !verifyManagerPin(managerPin)) {
         return false;
       }
@@ -2004,41 +2502,54 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
         status: 'closed',
         countedUsd,
         countedKhr,
-        varianceUsd: recon.varianceUsd,
-        varianceKhr: recon.varianceKhr,
+        varianceUsd,
+        varianceKhr,
         closedAt: new Date().toISOString(),
       };
-      if (firebaseUser && shopId && !prev.offlineMode) {
-        void syncShiftToFirestore(shopId, firebaseUser.uid, closed).catch(() => {});
-      }
       const log = appendAudit(
         prev,
         'Shift closed',
-        `Counted $${countedUsd.toFixed(2)} (variance $${recon.varianceUsd.toFixed(2)})`,
-        Math.abs(recon.varianceUsd) > 0.01 ? 'warning' : 'info'
+        `Counted $${countedUsd.toFixed(2)} & ${countedKhr.toLocaleString()} ៛ (variance $${varianceUsd.toFixed(2)} / ${varianceKhr.toLocaleString()} ៛)`,
+        Math.abs(varianceTotalInUsd) > 0.01 ? 'warning' : 'info'
       );
+      const coa =
+        prev.accounts && prev.accounts.length > 0
+          ? prev.accounts
+          : createDefaultChartOfAccounts();
+      const jeSeq = prev.nextJournalSeq || (prev.journalEntries?.length || 0) + 1;
+      const varJe = buildShiftCashJournal({
+        entryNo: `JE-2026-${String(jeSeq).padStart(4, '0')}`,
+        branchId: prev.activeBranchId,
+        kind: 'variance',
+        amountUsd: varianceTotalInUsd,
+        reason: `Shift #${current.id.slice(-4)} reconciliation`,
+        accounts: coa,
+        exchangeRate: activeBranch.exchangeRate,
+        postedBy: activeStaff.name,
+      });
       return {
         ...prev,
         shifts: prev.shifts.map((s) => (s.id === current.id ? closed : s)),
         auditLogs: [log, ...prev.auditLogs],
+        accounts: coa,
+        journalEntries: varJe
+          ? [varJe, ...(prev.journalEntries || [])]
+          : (prev.journalEntries || []),
+        nextJournalSeq: varJe ? jeSeq + 1 : jeSeq,
       };
     });
+    notify('Shift closed & Z-report logged to SQLite.', 'success');
     return true;
   };
 
   const addIngredient: PosContextValue['addIngredient'] = (ing) => {
     const newIng: Ingredient = {
       ...ing,
-      id: `ing_${Date.now()}`,
+      id: `ing_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
       branchId: state.activeBranchId,
       used7d: 0,
     };
-    setState((prev) => {
-      if (firebaseUser && shopId && !prev.offlineMode) {
-        void syncIngredientToFirestore(shopId, firebaseUser.uid, newIng).catch(() => {});
-      }
-      return { ...prev, ingredients: [newIng, ...prev.ingredients] };
-    });
+    setState((prev) => ({ ...prev, ingredients: [newIng, ...prev.ingredients] }));
   };
 
   const recordIngredientPurchase = (ingredientId: string, qtyAdded: number, totalCostUsd: number) => {
@@ -2049,9 +2560,30 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
       const nextOnHand = ing.onHand + qtyAdded;
       const nextAvgCost = (oldValue + totalCostUsd) / nextOnHand;
       const updated = { ...ing, onHand: nextOnHand, avgCostUsd: Number(nextAvgCost.toFixed(5)) };
+      const branch = prev.branches.find((b) => b.id === prev.activeBranchId) || prev.branches[0];
+      const coa =
+        prev.accounts && prev.accounts.length > 0
+          ? prev.accounts
+          : createDefaultChartOfAccounts();
+      const jeSeq = prev.nextJournalSeq || (prev.journalEntries?.length || 0) + 1;
+      const invJe = buildInventoryDirectJournal({
+        entryNo: `JE-2026-${String(jeSeq).padStart(4, '0')}`,
+        branchId: ing.branchId,
+        mode: 'purchase',
+        ingredientName: ing.nameEn,
+        amountUsd: totalCostUsd,
+        accounts: coa,
+        exchangeRate: branch?.exchangeRate || 4100,
+        postedBy: activeStaff.name,
+      });
       return {
         ...prev,
         ingredients: prev.ingredients.map((i) => (i.id === ingredientId ? updated : i)),
+        accounts: coa,
+        journalEntries: invJe
+          ? [invJe, ...(prev.journalEntries || [])]
+          : (prev.journalEntries || []),
+        nextJournalSeq: invJe ? jeSeq + 1 : jeSeq,
         stockHistory: [
           {
             id: `sh_${Date.now()}`,
@@ -2074,9 +2606,32 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
       const ing = prev.ingredients.find((i) => i.id === ingredientId);
       if (!ing || qtyWasted <= 0) return prev;
       const updated = { ...ing, onHand: Math.max(0, ing.onHand - qtyWasted) };
+      const wasteValueUsd = roundCurrency(qtyWasted * ing.avgCostUsd);
+      const branch = prev.branches.find((b) => b.id === prev.activeBranchId) || prev.branches[0];
+      const coa =
+        prev.accounts && prev.accounts.length > 0
+          ? prev.accounts
+          : createDefaultChartOfAccounts();
+      const jeSeq = prev.nextJournalSeq || (prev.journalEntries?.length || 0) + 1;
+      const wasteJe = buildInventoryDirectJournal({
+        entryNo: `JE-2026-${String(jeSeq).padStart(4, '0')}`,
+        branchId: ing.branchId,
+        mode: 'waste',
+        ingredientName: ing.nameEn,
+        amountUsd: wasteValueUsd,
+        reason: note || 'Kitchen waste',
+        accounts: coa,
+        exchangeRate: branch?.exchangeRate || 4100,
+        postedBy: activeStaff.name,
+      });
       return {
         ...prev,
         ingredients: prev.ingredients.map((i) => (i.id === ingredientId ? updated : i)),
+        accounts: coa,
+        journalEntries: wasteJe
+          ? [wasteJe, ...(prev.journalEntries || [])]
+          : (prev.journalEntries || []),
+        nextJournalSeq: wasteJe ? jeSeq + 1 : jeSeq,
         stockHistory: [
           {
             id: `sh_${Date.now()}`,
@@ -2130,7 +2685,7 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
 
   const saveMenuItem: PosContextValue['saveMenuItem'] = (item) => {
     setState((prev) => {
-      const id = item.id || `m_${Date.now()}`;
+      const id = item.id || `m_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
       const initials = item.nameEn
         .split(' ')
         .slice(0, 2)
@@ -2155,9 +2710,6 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
         options: item.options,
         oftenOrderedWith: item.oftenOrderedWith,
       };
-      if (firebaseUser && shopId && !prev.offlineMode) {
-        void syncMenuItemToFirestore(shopId, firebaseUser.uid, full).catch(() => {});
-      }
       const exists = prev.menuItems.some((m) => m.id === id);
       return {
         ...prev,
@@ -2176,12 +2728,41 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
   };
 
   const importMenuItems: PosContextValue['importMenuItems'] = (items) => {
-    items.forEach((it) => saveMenuItem(it));
+    setState((prev) => {
+      const baseTs = Date.now();
+      const created: MenuItem[] = items.map((it, idx) => {
+        const initials = it.nameEn
+          .split(' ')
+          .slice(0, 2)
+          .map((w) => w[0]?.toUpperCase() || '')
+          .join('');
+        return {
+          id: `m_${baseTs}_${idx}_${Math.random().toString(36).slice(2, 5)}`,
+          branchId: prev.activeBranchId,
+          itemType: 'product',
+          nameEn: it.nameEn,
+          nameKh: it.nameKh || it.nameEn,
+          nameVi: it.nameVi || it.nameEn,
+          category: it.category,
+          priceUsd: it.priceUsd,
+          station: it.station,
+          initials: initials || 'MN',
+          isBestSeller: false,
+          isNew: true,
+          active: true,
+        };
+      });
+      return {
+        ...prev,
+        menuItems: [...created, ...prev.menuItems],
+      };
+    });
+    notify(`Imported ${items.length} menu item(s) into SQLite!`, 'success');
   };
 
   const saveTable: PosContextValue['saveTable'] = (table) => {
     setState((prev) => {
-      const id = table.id || `t_${Date.now()}`;
+      const id = table.id || `t_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`;
       const full: PosTable = {
         id,
         branchId: prev.activeBranchId,
@@ -2190,9 +2771,6 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
         seats: table.seats,
         status: 'free',
       };
-      if (firebaseUser && shopId && !prev.offlineMode) {
-        void syncTableToFirestore(shopId, firebaseUser.uid, full).catch(() => {});
-      }
       const exists = prev.tables.some((t) => t.id === id);
       return {
         ...prev,
@@ -2204,9 +2782,54 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
   };
 
   const deleteTable = (tableId: string) => {
+    const target = state.tables.find((t) => t.id === tableId);
+    if (target && target.status !== 'free') {
+      notify(`Cannot delete table ${target.name} while occupied.`, 'warning');
+      return;
+    }
     setState((prev) => ({
       ...prev,
       tables: prev.tables.filter((t) => t.id !== tableId),
+    }));
+  };
+
+  const addLoyaltyMember: PosContextValue['addLoyaltyMember'] = ({
+    name,
+    phone,
+    initialPoints = 0,
+  }) => {
+    const cleanPhone = phone.replace(/\s+/g, '').trim();
+    const cleanName = name.trim();
+    if (!cleanPhone || !cleanName) return null;
+    const existing = state.members.find((m) => m.phone === cleanPhone);
+    if (existing) {
+      notify(`Member ${existing.name} (${cleanPhone}) is already enrolled.`, 'info');
+      return existing;
+    }
+    const newMember: LoyaltyMember = {
+      id: `mem_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
+      name: cleanName,
+      phone: cleanPhone,
+      points: Math.max(0, Math.round(initialPoints)),
+      totalSpentUsd: 0,
+      tier: 'Member',
+      lastVisit: new Date().toISOString().slice(0, 10),
+    };
+    setState((prev) => ({
+      ...prev,
+      members: [newMember, ...prev.members],
+    }));
+    notify(`Enrolled loyalty member ${cleanName}!`, 'success');
+    return newMember;
+  };
+
+  const toggleTenantFeatureFlag = (moduleKey: string, enabled: boolean) => {
+    setState((prev) => ({
+      ...prev,
+      featureFlags: {
+        ...(prev.featureFlags || {}),
+        [moduleKey]: enabled,
+      },
     }));
   };
 
@@ -2218,9 +2841,10 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
   };
 
   const addPromotion = (promo: Omit<PromotionRule, 'id'>) => {
+    const newPromo: PromotionRule = { ...promo, id: `promo_${Date.now()}` } as PromotionRule;
     setState((prev) => ({
       ...prev,
-      promotions: [{ ...promo, id: `promo_${Date.now()}` }, ...prev.promotions],
+      promotions: [newPromo, ...prev.promotions],
     }));
   };
 
@@ -2236,25 +2860,47 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     if (!tpl) return;
     const expiry = new Date(Date.now() + tpl.validDays * 86400000).toISOString().slice(0, 10);
     const code = Math.random().toString(36).substring(2, 10).toUpperCase();
-    setState((prev) => ({
-      ...prev,
-      customerPacks: [
-        {
-          id: `cpack_${Date.now()}`,
-          templateId,
-          packName: tpl.name,
-          customerName,
-          phone: phone.replace(/\s+/g, ''),
-          code,
-          usesLeft: tpl.totalUses,
-          totalUses: tpl.totalUses,
-          validUntil: expiry,
-          branchName: activeBranch.name,
-          active: true,
-        },
-        ...prev.customerPacks,
-      ],
-    }));
+    setState((prev) => {
+      const coa =
+        prev.accounts && prev.accounts.length > 0
+          ? prev.accounts
+          : createDefaultChartOfAccounts();
+      const jeSeq = prev.nextJournalSeq || (prev.journalEntries?.length || 0) + 1;
+      const packJe = buildPrepaidPackSaleJournal({
+        entryNo: `JE-2026-${String(jeSeq).padStart(4, '0')}`,
+        branchId: prev.activeBranchId,
+        packCode: code,
+        customerName,
+        priceUsd: tpl.priceUsd,
+        accounts: coa,
+        exchangeRate: activeBranch.exchangeRate,
+        postedBy: activeStaff.name,
+      });
+      return {
+        ...prev,
+        accounts: coa,
+        journalEntries: packJe
+          ? [packJe, ...(prev.journalEntries || [])]
+          : (prev.journalEntries || []),
+        nextJournalSeq: packJe ? jeSeq + 1 : jeSeq,
+        customerPacks: [
+          {
+            id: `cpack_${Date.now()}`,
+            templateId,
+            packName: tpl.name,
+            customerName,
+            phone: phone.replace(/\s+/g, ''),
+            code,
+            usesLeft: tpl.totalUses,
+            totalUses: tpl.totalUses,
+            validUntil: expiry,
+            branchName: activeBranch.name,
+            active: true,
+          },
+          ...prev.customerPacks,
+        ],
+      };
+    });
   };
 
   const voidCustomerPack = (packId: string) => {
@@ -2271,12 +2917,9 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
   const isAdminUser = useMemo(
     () =>
       isSuperAdmin(activeStaff) ||
-      Boolean(
-        firebaseUser &&
-          firebaseUser.email?.toLowerCase() === 'samchanpanha2021@gmail.com' &&
-          firebaseUser.emailVerified
-      ),
-    [activeStaff, firebaseUser]
+      isCloudAdmin ||
+      Boolean(firebaseUser && firebaseUser.role === 'admin'),
+    [activeStaff, isCloudAdmin, firebaseUser]
   );
 
   const hasCurrentPermission = useCallback(
@@ -2335,20 +2978,15 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     if (tid === currentTid) {
       setState(applyUpdate);
     } else {
+      const nextRemote = applyUpdate(targetTenant);
       setRawTenantStates((prevMap) => ({
         ...prevMap,
-        [tid]: prevMap[tid] ? applyUpdate(prevMap[tid]) : prevMap[tid],
+        [tid]: nextRemote,
       }));
-    }
-
-    if (firebaseUser && !targetTenant.offlineMode) {
-      const targetShopId =
-        tid === currentTid && shopId
-          ? shopId
-          : tid.startsWith('shop_')
-            ? tid
-            : getShopIdForTenant(firebaseUser.uid, tid);
-      void syncStaffMemberToFirestore(targetShopId, firebaseUser.uid, full).catch(() => {});
+      void saveTenantToSqlite(nextRemote, {
+        staffRole: activeStaff.role,
+        adminPin: activeStaff.pin,
+      }).catch(() => {});
     }
   };
 
@@ -2403,22 +3041,14 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     if (tid === currentTid) {
       setState(applyUpdate);
     } else {
+      const nextRemote = applyUpdate(targetTenant);
       setRawTenantStates((prevMap) => ({
         ...prevMap,
-        [tid]: prevMap[tid] ? applyUpdate(prevMap[tid]) : prevMap[tid],
+        [tid]: nextRemote,
       }));
-    }
-
-    if (firebaseUser && !targetTenant.offlineMode) {
-      const targetShopId =
-        tid === currentTid && shopId
-          ? shopId
-          : tid.startsWith('shop_')
-            ? tid
-            : getShopIdForTenant(firebaseUser.uid, tid);
-      void syncStaffMemberToFirestore(targetShopId, firebaseUser.uid, {
-        ...targetMember,
-        permissions: normalizedNext,
+      void saveTenantToSqlite(nextRemote, {
+        staffRole: activeStaff.role,
+        adminPin: activeStaff.pin,
       }).catch(() => {});
     }
 
@@ -2455,26 +3085,15 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     if (tenantId === currentTid) {
       setState(applyUpdate);
     } else {
+      const nextRemote = applyUpdate(targetTenant);
       setRawTenantStates((prevMap) => ({
         ...prevMap,
-        [tenantId]: prevMap[tenantId] ? applyUpdate(prevMap[tenantId]) : prevMap[tenantId],
+        [tenantId]: nextRemote,
       }));
-    }
-
-    if (firebaseUser && !targetTenant.offlineMode) {
-      const targetShopId =
-        tenantId === currentTid && shopId
-          ? shopId
-          : tenantId.startsWith('shop_')
-            ? tenantId
-            : getShopIdForTenant(firebaseUser.uid, tenantId);
-      void updateShopOwnerPermissionsInFirestore(targetShopId, normalized).catch(() => {});
-      for (const ownerMember of targetTenant.staff.filter((s) => s.role === 'owner')) {
-        void syncStaffMemberToFirestore(targetShopId, firebaseUser.uid, {
-          ...ownerMember,
-          permissions: normalized,
-        }).catch(() => {});
-      }
+      void saveTenantToSqlite(nextRemote, {
+        staffRole: activeStaff.role,
+        adminPin: activeStaff.pin,
+      }).catch(() => {});
     }
 
     return true;
@@ -2551,25 +3170,20 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
       const branches = prev.branches.map((b) =>
         b.id === branchId ? { ...b, ...partial } : b
       );
-      const updated = branches.find((b) => b.id === branchId);
-      if (updated && firebaseUser && !prev.offlineMode) {
-        const targetShopId =
-          tenantId === currentTid && shopId
-            ? shopId
-            : tenantId.startsWith('shop_')
-              ? tenantId
-              : getShopIdForTenant(firebaseUser.uid, tenantId);
-        void syncBranchToFirestore(targetShopId, firebaseUser.uid, updated).catch(() => {});
-      }
       return { ...prev, branches };
     };
     if (tenantId === currentTid) {
       setState(applyUpdate);
     } else {
+      const nextRemote = applyUpdate(targetTenant);
       setRawTenantStates((prevMap) => ({
         ...prevMap,
-        [tenantId]: prevMap[tenantId] ? applyUpdate(prevMap[tenantId]) : prevMap[tenantId],
+        [tenantId]: nextRemote,
       }));
+      void saveTenantToSqlite(nextRemote, {
+        staffRole: activeStaff.role,
+        adminPin: activeStaff.pin,
+      }).catch(() => {});
     }
     return true;
   };
@@ -2584,7 +3198,7 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     });
     if (!authCheck.ok) return false;
     setState((prev) => ({ ...prev, activeStaffId: staffId }));
-    if (!hasPermission(target, navSection, state.ownerPermissions)) {
+    if (!canAccessNavSection(target, navSection, state.ownerPermissions)) {
       setNavSection(getFirstAllowedNavSection(target, state.ownerPermissions));
     }
     return true;
@@ -2632,11 +3246,32 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
         replacesInvoiceNo: orig.invoiceNo,
       };
       const log = appendAudit(prev, 'Credit note issued', `Credit note for ${orig.invoiceNo}`, 'warning');
+      const coa =
+        prev.accounts && prev.accounts.length > 0
+          ? prev.accounts
+          : createDefaultChartOfAccounts();
+      const jeSeq = prev.nextJournalSeq || (prev.journalEntries?.length || 0) + 1;
+      const refundJe = buildPosRefundJournal({
+        entryNo: `JE-2026-${String(jeSeq).padStart(4, '0')}`,
+        branchId: orig.branchId,
+        invoiceNo: cn.invoiceNo,
+        exclVatUsd: orig.exclVatUsd,
+        vatUsd: orig.vatUsd,
+        totalUsd: orig.totalUsd,
+        accounts: coa,
+        exchangeRate: branch?.exchangeRate || 4100,
+        postedBy: activeStaff.name,
+      });
       return {
         ...prev,
         nextInvoiceSeq: prev.nextInvoiceSeq + 1,
         invoices: [cn, ...prev.invoices],
         auditLogs: [log, ...prev.auditLogs],
+        accounts: coa,
+        journalEntries: refundJe
+          ? [refundJe, ...(prev.journalEntries || [])]
+          : (prev.journalEntries || []),
+        nextJournalSeq: refundJe ? jeSeq + 1 : jeSeq,
       };
     });
   };
@@ -2647,26 +3282,42 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
       const branches = prev.branches.map((b) =>
         b.id === prev.activeBranchId ? { ...b, ...partial } : b
       );
-      const updated = branches.find((b) => b.id === prev.activeBranchId);
-      if (updated && firebaseUser && shopId && !prev.offlineMode) {
-        void syncBranchToFirestore(shopId, firebaseUser.uid, updated).catch(() => {});
-      }
       return { ...prev, branches };
     });
   };
 
-  const addBranch = (name: string, code: string) => {
+  const addBranch = (
+    name: string,
+    code: string,
+    address?: string,
+    cloneFromCurrent = true
+  ) => {
+    const cleanCode = code.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6) || 'BRN';
+    const newBranchId = `branch_${cleanCode.toLowerCase()}_${Date.now().toString(36)}`;
     const newBranch: BranchConfig = {
       ...activeBranch,
-      id: `branch_${Date.now()}`,
-      name,
-      code: code.toUpperCase().slice(0, 6),
+      id: newBranchId,
+      name: name.trim(),
+      code: cleanCode,
+      address: address?.trim() || activeBranch.address,
+      invoiceTemplate: normalizeInvoiceTemplate(
+        { ...activeBranch.invoiceTemplate, invoicePrefix: cleanCode },
+        { shopName: name.trim(), branchCode: cleanCode, businessType: state.businessType }
+      ),
     };
-    setState((prev) => ({
-      ...prev,
-      branches: [...prev.branches, newBranch],
-      activeBranchId: newBranch.id,
-    }));
+    setState((prev) => {
+      const withBranch: PosAppState = {
+        ...prev,
+        branches: [...prev.branches, newBranch],
+        activeBranchId: newBranchId,
+      };
+      return cloneFromCurrent
+        ? cloneBranchResources(withBranch, prev.activeBranchId, newBranchId)
+        : withBranch;
+    });
+    setSelectedTableId(null);
+    setActiveOrderId(null);
+    notify(`Created branch "${name.trim()}" (${cleanCode}) in SQLite!`, 'success');
   };
 
   const setPlan = (plan: SubscriptionPlan) => {
@@ -2674,6 +3325,7 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
   };
 
   const activateTenantSubscription: PosContextValue['activateTenantSubscription'] = (params) => {
+    const tid = state.tenantId || activeTenantId;
     setState((prev) => {
       const nextDays = calculateExtendedDays(
         prev.planDaysLeft,
@@ -2687,15 +3339,6 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
         `Plan ${params.plan.toUpperCase()} +${params.days}d ($${params.amountUsd.toFixed(2)}) · Ref ${params.paymentRef}`,
         'info'
       );
-      if (firebaseUser && shopId && !prev.offlineMode) {
-        void updateShopSubscriptionInFirestore(shopId, {
-          plan: params.plan,
-          subscriptionStatus: 'active',
-          subscriptionRef: params.paymentRef,
-          planDaysLeft: nextDays,
-          subscriptionExpiresAt: expiresAt,
-        }).catch(() => {});
-      }
       return {
         ...prev,
         plan: params.plan,
@@ -2707,24 +3350,49 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
         auditLogs: [log, ...prev.auditLogs],
       };
     });
+
+    if (tid && !state.offlineMode) {
+      skipSqlitePushRef.current = true;
+      void activateSubscriptionInSqlite({
+        tenantId: tid,
+        businessCode: state.businessCode,
+        plan: params.plan,
+        days: params.days,
+        paymentRef: params.paymentRef,
+        amountUsd: params.amountUsd,
+        actorName: activeStaff.name,
+      })
+        .then((saved) => {
+          skipSqlitePushRef.current = true;
+          const normalized = normalizeTenantRbac(saved);
+          setRawTenantStates((prev) => ({ ...prev, [tid]: normalized }));
+          setState((prev) => ({ ...normalized, activeStaffId: prev.activeStaffId }));
+          notify(`Subscription activated (${params.plan.toUpperCase()}) in SQLite!`, 'success');
+        })
+        .catch(() => {});
+    }
   };
 
   const toggleOfflineMode = () => {
-    setState((prev) => ({ ...prev, offlineMode: !prev.offlineMode }));
+    setState((prev) => {
+      const nextOffline = !prev.offlineMode;
+      notify(
+        nextOffline
+          ? 'Switched to Offline Queue mode (local cache active)'
+          : 'Back online — syncing queued bills to SQLite',
+        nextOffline ? 'warning' : 'success'
+      );
+      return { ...prev, offlineMode: nextOffline };
+    });
   };
 
   const syncOfflineBills = () => {
-    setState((prev) => {
-      const pending = prev.orders.filter((o) => o.offlinePendingSync);
-      if (firebaseUser && shopId) {
-        pending.forEach((o) => void syncOrderToFirestore(shopId, firebaseUser.uid, o).catch(() => {}));
-      }
-      return {
-        ...prev,
-        offlineMode: false,
-        orders: prev.orders.map((o) => ({ ...o, offlinePendingSync: false })),
-      };
-    });
+    setState((prev) => ({
+      ...prev,
+      offlineMode: false,
+      orders: prev.orders.map((o) => ({ ...o, offlinePendingSync: false })),
+    }));
+    notify('All queued bills synced to SQLite!', 'success');
   };
 
   const setDisplayOrder = useCallback((orderId: string | null, showKhqr: boolean) => {
@@ -2738,14 +3406,705 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
 
   const resetDemoData = () => {
     if (!canStartDemoMode(platformSettings)) return;
-    if (!isSuperAdmin(activeStaff) && !state.isDemoTenant) return;
+    if (isSuperAdmin(activeStaff)) {
+      notify('Store operational data is disabled on Super Admin accounts.', 'warning');
+      return;
+    }
+    if (!state.isDemoTenant) return;
     const fresh = createSeedState('restaurant');
-    const keepAdmin = activeStaff.role === 'admin';
-    const adminUser = fresh.staff.find((s) => s.role === 'admin');
-    setState(keepAdmin && adminUser ? { ...fresh, activeStaffId: adminUser.id } : fresh);
+    setState(fresh);
     setActiveTenantId(fresh.tenantId || 'tenant_lotus_bkk1');
     setSelectedTableId(null);
     setActiveOrderId(null);
+    notify('Demo Store sandbox reset to clean sample data!', 'success');
+  };
+
+  // -------------------------------------------------------------------------
+  // Procurement & Supplier Purchase Orders (PO) Actions
+  // -------------------------------------------------------------------------
+  const saveSupplier: PosContextValue['saveSupplier'] = (sup) => {
+    if (isSuperAdmin(activeStaff)) return;
+    setState((prev) => {
+      const existingList = prev.suppliers || [];
+      const id = sup.id || `sup_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`;
+      const exists = existingList.find((s) => s.id === id);
+      const record: Supplier = {
+        ...sup,
+        id,
+        branchId: sup.branchId || 'all',
+        name: sup.name.trim(),
+        createdAt: exists?.createdAt || new Date().toISOString(),
+      };
+      return {
+        ...prev,
+        suppliers: exists
+          ? existingList.map((s) => (s.id === id ? record : s))
+          : [record, ...existingList],
+      };
+    });
+    notify(`Saved supplier "${sup.name.trim()}".`, 'success');
+  };
+
+  const deleteSupplier = (supplierId: string) => {
+    if (isSuperAdmin(activeStaff)) return;
+    const hasOpenPo = (state.purchaseOrders || []).some(
+      (po) => po.supplierId === supplierId && po.balanceDueUsd > 0.01
+    );
+    if (hasOpenPo) {
+      notify('Cannot remove supplier with unpaid Accounts Payable balance.', 'warning');
+      return;
+    }
+    setState((prev) => ({
+      ...prev,
+      suppliers: (prev.suppliers || []).filter((s) => s.id !== supplierId),
+    }));
+  };
+
+  const createPurchaseOrder: PosContextValue['createPurchaseOrder'] = (params) => {
+    if (isSuperAdmin(activeStaff)) return null;
+    const sup = (state.suppliers || []).find((s) => s.id === params.supplierId);
+    if (!sup || params.lines.length === 0) return null;
+
+    const seq = state.nextPoSeq || (state.purchaseOrders?.length || 0) + 1;
+    const poNumber = `PO-2026-${String(seq).padStart(4, '0')}`;
+    const nowIso = new Date().toISOString();
+    const cleanLines: PurchaseOrderLine[] = params.lines.map((l, idx) => {
+      const lineTotalUsd = roundCurrency(Math.max(0.01, l.orderedQty) * Math.max(0, l.unitCostUsd));
+      return {
+        ...l,
+        id: `pol_${Date.now()}_${idx}_${Math.random().toString(36).slice(2, 5)}`,
+        receivedQty: 0,
+        lineTotalUsd,
+      };
+    });
+
+    const subtotalUsd = roundCurrency(cleanLines.reduce((s, l) => s + l.lineTotalUsd, 0));
+    const inputVatUsd = params.applyInputVat ? roundCurrency(subtotalUsd * 0.1) : 0;
+    const totalUsd = roundCurrency(subtotalUsd + inputVatUsd);
+    const totalKhr = usdToKhr(totalUsd, activeBranch.exchangeRate, activeBranch.rielRounding);
+    const dueDate = computeDueDateFromTerms(params.orderDate, params.paymentTerms);
+
+    const newPo: PurchaseOrder = {
+      id: `po_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      poNumber,
+      branchId: activeBranch.id,
+      supplierId: sup.id,
+      supplierName: sup.name,
+      supplierVattin: sup.vattin,
+      status: params.status || 'sent',
+      paymentStatus: 'unpaid',
+      orderDate: params.orderDate,
+      expectedDate: params.expectedDate || params.orderDate,
+      dueDate,
+      paymentTerms: params.paymentTerms,
+      applyInputVat: params.applyInputVat,
+      whtPercent: params.whtPercent || 0,
+      lines: cleanLines,
+      subtotalUsd,
+      inputVatUsd,
+      totalUsd,
+      totalKhr,
+      receivedSubtotalUsd: 0,
+      receivedVatUsd: 0,
+      receivedTotalUsd: 0,
+      paidUsd: 0,
+      whtWithheldUsd: 0,
+      balanceDueUsd: 0,
+      grnHistory: [],
+      payments: [],
+      note: params.note?.trim() || undefined,
+      createdBy: activeStaff.name,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    };
+
+    setState((prev) => {
+      const log = appendAudit(
+        prev,
+        'Purchase Order created',
+        `${poNumber} to ${sup.name} ($${totalUsd.toFixed(2)})`
+      );
+      return {
+        ...prev,
+        nextPoSeq: seq + 1,
+        purchaseOrders: [newPo, ...(prev.purchaseOrders || [])],
+        auditLogs: [log, ...prev.auditLogs],
+      };
+    });
+    notify(`Created ${poNumber} ($${totalUsd.toFixed(2)}) for ${sup.name}!`, 'success');
+    return newPo;
+  };
+
+  const autoDraftLowStockPurchaseOrders = (): number => {
+    if (isSuperAdmin(activeStaff)) return 0;
+    const proposals = computeLowStockAutoDraftPos({
+      branchId: activeBranch.id,
+      ingredients: state.ingredients,
+      suppliers: state.suppliers || [],
+      existingPos: state.purchaseOrders || [],
+    });
+    if (proposals.length === 0) {
+      notify('All low-stock ingredients are already covered or above minimum level!', 'info');
+      return 0;
+    }
+
+    const today = new Date().toISOString().slice(0, 10);
+    const tomorrow = new Date(Date.now() + 86_400_000).toISOString().slice(0, 10);
+    const nowIso = new Date().toISOString();
+
+    setState((prev) => {
+      let seq = prev.nextPoSeq || (prev.purchaseOrders?.length || 0) + 1;
+      const drafted: PurchaseOrder[] = proposals.map((prop) => {
+        const poNumber = `PO-2026-${String(seq++).padStart(4, '0')}`;
+        const applyVat = Boolean(prop.supplierVattin);
+        const inputVatUsd = applyVat ? roundCurrency(prop.subtotalUsd * 0.1) : 0;
+        const totalUsd = roundCurrency(prop.subtotalUsd + inputVatUsd);
+        return {
+          id: `po_auto_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+          poNumber,
+          branchId: activeBranch.id,
+          supplierId: prop.supplierId,
+          supplierName: prop.supplierName,
+          supplierVattin: prop.supplierVattin,
+          status: 'draft',
+          paymentStatus: 'unpaid',
+          orderDate: today,
+          expectedDate: tomorrow,
+          dueDate: computeDueDateFromTerms(today, prop.paymentTerms),
+          paymentTerms: prop.paymentTerms,
+          applyInputVat: applyVat,
+          whtPercent: 0,
+          lines: prop.lines,
+          subtotalUsd: prop.subtotalUsd,
+          inputVatUsd,
+          totalUsd,
+          totalKhr: usdToKhr(totalUsd, activeBranch.exchangeRate, activeBranch.rielRounding),
+          receivedSubtotalUsd: 0,
+          receivedVatUsd: 0,
+          receivedTotalUsd: 0,
+          paidUsd: 0,
+          whtWithheldUsd: 0,
+          balanceDueUsd: 0,
+          grnHistory: [],
+          payments: [],
+          note: 'Auto-drafted from low-stock alert threshold',
+          createdBy: activeStaff.name,
+          createdAt: nowIso,
+          updatedAt: nowIso,
+        };
+      });
+
+      const log = appendAudit(
+        prev,
+        'Auto-drafted Low-Stock POs',
+        `Generated ${drafted.length} draft PO(s) for low-stock ingredients`
+      );
+
+      return {
+        ...prev,
+        nextPoSeq: seq,
+        purchaseOrders: [...drafted, ...(prev.purchaseOrders || [])],
+        auditLogs: [log, ...prev.auditLogs],
+      };
+    });
+
+    notify(`Auto-drafted ${proposals.length} restock Purchase Order(s)!`, 'success');
+    return proposals.length;
+  };
+
+  const updatePurchaseOrderStatus: PosContextValue['updatePurchaseOrderStatus'] = (
+    poId,
+    status
+  ) => {
+    if (isSuperAdmin(activeStaff)) return;
+    setState((prev) => ({
+      ...prev,
+      purchaseOrders: (prev.purchaseOrders || []).map((po) => {
+        if (po.id !== poId) return po;
+        if (status === 'cancelled' && po.receivedTotalUsd > 0) {
+          return po;
+        }
+        return { ...po, status, updatedAt: new Date().toISOString() };
+      }),
+    }));
+    notify(`Purchase Order updated to ${status.toUpperCase()}.`, 'info');
+  };
+
+  const receivePurchaseOrder: PosContextValue['receivePurchaseOrder'] = (params) => {
+    if (isSuperAdmin(activeStaff)) return false;
+    const targetPo = (state.purchaseOrders || []).find((p) => p.id === params.poId);
+    if (!targetPo || targetPo.status === 'cancelled') return false;
+
+    const validReceipts = params.lines.filter((l) => l.qtyReceivedNow > 0);
+    if (validReceipts.length === 0) return false;
+
+    const nowIso = new Date().toISOString();
+
+    setState((prev) => {
+      const po = (prev.purchaseOrders || []).find((p) => p.id === params.poId);
+      if (!po) return prev;
+
+      const updatedLines = po.lines.map((line) => {
+        const rec = validReceipts.find((r) => r.lineId === line.id);
+        if (!rec) return line;
+        const nextReceived = roundCurrency(line.receivedQty + rec.qtyReceivedNow);
+        const effectiveCost = rec.unitCostUsd > 0 ? rec.unitCostUsd : line.unitCostUsd;
+        return {
+          ...line,
+          receivedQty: nextReceived,
+          unitCostUsd: effectiveCost,
+          lineTotalUsd: roundCurrency(line.orderedQty * effectiveCost),
+        };
+      });
+
+      const grnLines = validReceipts.map((r) => {
+        const origLine = po.lines.find((l) => l.id === r.lineId)!;
+        const unitCost = r.unitCostUsd > 0 ? r.unitCostUsd : origLine.unitCostUsd;
+        return {
+          lineId: r.lineId,
+          ingredientId: origLine.ingredientId,
+          itemName: origLine.itemName,
+          qtyReceivedNow: r.qtyReceivedNow,
+          unitCostUsd: unitCost,
+          lineSubtotalUsd: roundCurrency(r.qtyReceivedNow * unitCost),
+        };
+      });
+
+      const grnSubtotal = roundCurrency(
+        grnLines.reduce((s, l) => s + l.lineSubtotalUsd, 0)
+      );
+      const grnVat = po.applyInputVat ? roundCurrency(grnSubtotal * 0.1) : 0;
+      const grnTotal = roundCurrency(grnSubtotal + grnVat);
+      const grnNumber = `GRN-${String(po.grnHistory.length + 1).padStart(4, '0')}`;
+
+      // Update kitchen ingredients stock & weighted moving-average cost
+      const nextIngredients = prev.ingredients.map((ing) => ({ ...ing }));
+      const nextStockHistory = [...prev.stockHistory];
+
+      for (const gl of grnLines) {
+        if (!gl.ingredientId) continue;
+        const origLine = po.lines.find((l) => l.id === gl.lineId);
+        const conv = Math.max(1, origLine?.conversionFactor || 1);
+        const addedBaseUnits = roundCurrency(gl.qtyReceivedNow * conv);
+        const targetIng = nextIngredients.find((i) => i.id === gl.ingredientId);
+        if (targetIng && addedBaseUnits > 0) {
+          const oldVal = Math.max(0, targetIng.onHand) * targetIng.avgCostUsd;
+          const nextOnHand = roundCurrency(targetIng.onHand + addedBaseUnits);
+          const nextAvg =
+            nextOnHand > 0
+              ? Number(((oldVal + gl.lineSubtotalUsd) / nextOnHand).toFixed(5))
+              : targetIng.avgCostUsd;
+          targetIng.onHand = nextOnHand;
+          targetIng.avgCostUsd = nextAvg;
+          nextStockHistory.unshift({
+            id: `sh_grn_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
+            ingredientId: targetIng.id,
+            ingredientName: targetIng.nameEn,
+            type: 'purchase',
+            qtyDelta: addedBaseUnits,
+            costUsd: gl.lineSubtotalUsd,
+            note: `${po.poNumber} · ${grnNumber}`,
+            createdAt: nowIso,
+          });
+        }
+      }
+
+      const allFullyReceived = updatedLines.every(
+        (l) => l.receivedQty >= l.orderedQty - 0.0001
+      );
+      const nextStatus: PurchaseOrder['status'] = allFullyReceived ? 'received' : 'partial';
+      const nextRecSub = roundCurrency(po.receivedSubtotalUsd + grnSubtotal);
+      const nextRecVat = roundCurrency(po.receivedVatUsd + grnVat);
+      const nextRecTot = roundCurrency(po.receivedTotalUsd + grnTotal);
+      const nextBalanceDue = roundCurrency(
+        Math.max(0, nextRecTot - po.paidUsd - po.whtWithheldUsd)
+      );
+      const nextPayStatus: PurchaseOrder['paymentStatus'] =
+        nextBalanceDue <= 0.009
+          ? 'paid'
+          : po.paidUsd + po.whtWithheldUsd > 0
+            ? 'partial'
+            : 'unpaid';
+
+      const updatedPo: PurchaseOrder = {
+        ...po,
+        status: nextStatus,
+        paymentStatus: nextPayStatus,
+        lines: updatedLines,
+        receivedSubtotalUsd: nextRecSub,
+        receivedVatUsd: nextRecVat,
+        receivedTotalUsd: nextRecTot,
+        balanceDueUsd: nextBalanceDue,
+        grnHistory: [
+          {
+            id: `grn_${Date.now()}`,
+            grnNumber,
+            receivedAt: nowIso,
+            receivedBy: activeStaff.name,
+            supplierInvoiceRef: params.supplierInvoiceRef?.trim() || undefined,
+            note: params.note?.trim() || undefined,
+            lines: grnLines,
+            subtotalUsd: grnSubtotal,
+            inputVatUsd: grnVat,
+            totalUsd: grnTotal,
+          },
+          ...po.grnHistory,
+        ],
+        updatedAt: nowIso,
+      };
+
+      // Automated Double-Entry Journal: Debit Inventory + Input VAT / Credit Accounts Payable
+      const coa =
+        prev.accounts && prev.accounts.length > 0
+          ? prev.accounts
+          : createDefaultChartOfAccounts();
+      const jeSeq = prev.nextJournalSeq || (prev.journalEntries?.length || 0) + 1;
+      const grnJe = buildPoGrnJournal({
+        entryNo: `JE-2026-${String(jeSeq).padStart(4, '0')}`,
+        branchId: po.branchId,
+        poNumber: po.poNumber,
+        grnNumber,
+        supplierName: po.supplierName,
+        subtotalUsd: grnSubtotal,
+        inputVatUsd: grnVat,
+        totalUsd: grnTotal,
+        accounts: coa,
+        exchangeRate: activeBranch.exchangeRate,
+        postedBy: activeStaff.name,
+        date: nowIso.slice(0, 10),
+      });
+
+      const log = appendAudit(
+        prev,
+        'Goods Received (GRN)',
+        `${grnNumber} on ${po.poNumber} ($${grnTotal.toFixed(2)} posted to Inventory & AP)`
+      );
+
+      return {
+        ...prev,
+        ingredients: nextIngredients,
+        stockHistory: nextStockHistory.slice(0, 80),
+        purchaseOrders: (prev.purchaseOrders || []).map((p) =>
+          p.id === po.id ? updatedPo : p
+        ),
+        accounts: coa,
+        journalEntries: grnJe
+          ? [grnJe, ...(prev.journalEntries || [])]
+          : (prev.journalEntries || []),
+        nextJournalSeq: grnJe ? jeSeq + 1 : jeSeq,
+        auditLogs: [log, ...prev.auditLogs],
+      };
+    });
+
+    notify('Goods Receipt (GRN) recorded — stock, moving-avg cost & AP ledger updated!', 'success');
+    return true;
+  };
+
+  const payPurchaseOrder: PosContextValue['payPurchaseOrder'] = (params) => {
+    if (isSuperAdmin(activeStaff)) return false;
+    const targetPo = (state.purchaseOrders || []).find((p) => p.id === params.poId);
+    if (!targetPo || params.grossSettledUsd <= 0) return false;
+
+    const nowIso = new Date().toISOString();
+    const whtPct = Math.max(0, Math.min(30, params.whtPercent ?? targetPo.whtPercent ?? 0));
+    const grossSettled = roundCurrency(
+      Math.min(targetPo.balanceDueUsd, params.grossSettledUsd)
+    );
+    if (grossSettled <= 0) return false;
+
+    const whtDeductedUsd = roundCurrency((grossSettled * whtPct) / 100);
+    const cashPaidUsd = roundCurrency(grossSettled - whtDeductedUsd);
+    const cleanRef =
+      params.paymentRef.trim() || `${params.method.toUpperCase()}-${Date.now().toString().slice(-6)}`;
+
+    setState((prev) => {
+      const po = (prev.purchaseOrders || []).find((p) => p.id === params.poId);
+      if (!po) return prev;
+
+      const nextPaid = roundCurrency(po.paidUsd + cashPaidUsd);
+      const nextWht = roundCurrency(po.whtWithheldUsd + whtDeductedUsd);
+      const nextBalance = roundCurrency(
+        Math.max(0, po.receivedTotalUsd - nextPaid - nextWht)
+      );
+      const nextPayStatus: PurchaseOrder['paymentStatus'] =
+        nextBalance <= 0.009 ? 'paid' : 'partial';
+
+      const payRec: PurchaseOrderPaymentRecord = {
+        id: `popay_${Date.now()}`,
+        paidAt: nowIso,
+        paidBy: activeStaff.name,
+        method: params.method,
+        grossSettledUsd: grossSettled,
+        whtDeductedUsd,
+        cashPaidUsd,
+        paymentRef: cleanRef,
+        note: params.note?.trim() || undefined,
+      };
+
+      const updatedPo: PurchaseOrder = {
+        ...po,
+        paidUsd: nextPaid,
+        whtWithheldUsd: nextWht,
+        balanceDueUsd: nextBalance,
+        paymentStatus: nextPayStatus,
+        payments: [payRec, ...po.payments],
+        updatedAt: nowIso,
+      };
+
+      const coa =
+        prev.accounts && prev.accounts.length > 0
+          ? prev.accounts
+          : createDefaultChartOfAccounts();
+      const jeSeq = prev.nextJournalSeq || (prev.journalEntries?.length || 0) + 1;
+      const payJe = buildPoPaymentJournal({
+        entryNo: `JE-2026-${String(jeSeq).padStart(4, '0')}`,
+        branchId: po.branchId,
+        poNumber: po.poNumber,
+        supplierName: po.supplierName,
+        grossSettledUsd: grossSettled,
+        whtDeductedUsd,
+        cashPaidUsd,
+        method: params.method,
+        paymentRef: cleanRef,
+        accounts: coa,
+        exchangeRate: activeBranch.exchangeRate,
+        postedBy: activeStaff.name,
+        date: nowIso.slice(0, 10),
+      });
+
+      const log = appendAudit(
+        prev,
+        'Vendor AP Payment',
+        `Paid $${cashPaidUsd.toFixed(2)} to ${po.supplierName} (${po.poNumber})`
+      );
+
+      return {
+        ...prev,
+        purchaseOrders: (prev.purchaseOrders || []).map((p) =>
+          p.id === po.id ? updatedPo : p
+        ),
+        accounts: coa,
+        journalEntries: payJe
+          ? [payJe, ...(prev.journalEntries || [])]
+          : (prev.journalEntries || []),
+        nextJournalSeq: payJe ? jeSeq + 1 : jeSeq,
+        auditLogs: [log, ...prev.auditLogs],
+      };
+    });
+
+    notify(`Settled $${grossSettled.toFixed(2)} AP on ${targetPo.poNumber}!`, 'success');
+    return true;
+  };
+
+  // -------------------------------------------------------------------------
+  // Double-Entry Accounting & General Ledger Actions
+  // -------------------------------------------------------------------------
+  const saveLedgerAccount: PosContextValue['saveLedgerAccount'] = (acc) => {
+    if (isSuperAdmin(activeStaff)) return;
+    setState((prev) => {
+      const coa =
+        prev.accounts && prev.accounts.length > 0
+          ? prev.accounts
+          : createDefaultChartOfAccounts();
+      const cleanCode = acc.code.trim();
+      const existing = coa.find((a) => a.code === cleanCode || a.id === acc.id);
+      const record: LedgerAccount = {
+        ...acc,
+        id: existing?.id || `coa_${cleanCode}_${Date.now().toString(36)}`,
+        code: cleanCode,
+        systemAccount: existing?.systemAccount ?? false,
+      };
+      const nextAccounts = existing
+        ? coa.map((a) => (a.code === existing.code ? record : a))
+        : [...coa, record].sort((a, b) => a.code.localeCompare(b.code));
+      return { ...prev, accounts: nextAccounts };
+    });
+    notify(`Saved account ${acc.code} — ${acc.nameEn}.`, 'success');
+  };
+
+  const recordOperatingExpense: PosContextValue['recordOperatingExpense'] = (params) => {
+    if (isSuperAdmin(activeStaff)) return null;
+    if (params.subtotalUsd <= 0 || !params.vendorName.trim()) return null;
+
+    const coa =
+      state.accounts && state.accounts.length > 0
+        ? state.accounts
+        : createDefaultChartOfAccounts();
+    const accountName = resolveAccountName(coa, params.expenseAccountCode);
+    const subtotalUsd = roundCurrency(params.subtotalUsd);
+    const inputVatUsd = params.applyInputVat ? roundCurrency(subtotalUsd * 0.1) : 0;
+    const totalUsd = roundCurrency(subtotalUsd + inputVatUsd);
+    const whtPct = Math.max(0, Math.min(30, params.whtPercent || 0));
+    const whtAmountUsd = roundCurrency((subtotalUsd * whtPct) / 100);
+    const cashPaidUsd =
+      params.paymentStatus === 'paid'
+        ? roundCurrency(totalUsd - whtAmountUsd)
+        : 0;
+    const expSeq = (state.expenses?.length || 0) + 1;
+    const voucherNo = `EXP-${String(expSeq).padStart(4, '0')}`;
+    const nowIso = new Date().toISOString();
+
+    const expense: OperatingExpense = {
+      id: `exp_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
+      voucherNo,
+      branchId: activeBranch.id,
+      date: params.date,
+      expenseAccountCode: params.expenseAccountCode,
+      expenseAccountName: accountName,
+      vendorName: params.vendorName.trim(),
+      vendorVattin: params.vendorVattin?.trim() || undefined,
+      description: params.description.trim() || accountName,
+      subtotalUsd,
+      applyInputVat: params.applyInputVat,
+      inputVatUsd,
+      whtPercent: whtPct,
+      whtAmountUsd,
+      totalUsd,
+      cashPaidUsd,
+      paymentStatus: params.paymentStatus,
+      paymentMethod: params.paymentMethod || 'Cash',
+      paymentRef: params.paymentRef?.trim() || undefined,
+      createdBy: activeStaff.name,
+      createdAt: nowIso,
+    };
+
+    setState((prev) => {
+      const activeCoa =
+        prev.accounts && prev.accounts.length > 0
+          ? prev.accounts
+          : createDefaultChartOfAccounts();
+      const jeSeq = prev.nextJournalSeq || (prev.journalEntries?.length || 0) + 1;
+      const expJe = buildOperatingExpenseJournal({
+        entryNo: `JE-2026-${String(jeSeq).padStart(4, '0')}`,
+        expense,
+        accounts: activeCoa,
+        exchangeRate: activeBranch.exchangeRate,
+        postedBy: activeStaff.name,
+      });
+      const log = appendAudit(
+        prev,
+        'Expense voucher posted',
+        `${voucherNo}: ${accountName} ($${totalUsd.toFixed(2)})`
+      );
+      return {
+        ...prev,
+        accounts: activeCoa,
+        expenses: [expense, ...(prev.expenses || [])],
+        journalEntries: expJe
+          ? [expJe, ...(prev.journalEntries || [])]
+          : (prev.journalEntries || []),
+        nextJournalSeq: expJe ? jeSeq + 1 : jeSeq,
+        auditLogs: [log, ...prev.auditLogs],
+      };
+    });
+
+    notify(`Posted expense ${voucherNo} ($${totalUsd.toFixed(2)}) to General Ledger!`, 'success');
+    return expense;
+  };
+
+  const postManualJournalEntry: PosContextValue['postManualJournalEntry'] = (params) => {
+    if (isSuperAdmin(activeStaff)) return false;
+    const coa =
+      state.accounts && state.accounts.length > 0
+        ? state.accounts
+        : createDefaultChartOfAccounts();
+    const jeSeq = state.nextJournalSeq || (state.journalEntries?.length || 0) + 1;
+    const entryNo = `JE-2026-${String(jeSeq).padStart(4, '0')}`;
+
+    try {
+      const built = finalizeBalancedJournal({
+        entryNo,
+        branchId: activeBranch.id,
+        date: params.date,
+        sourceType: 'manual',
+        sourceRef: params.sourceRef?.trim() || 'MANUAL',
+        description: params.description.trim(),
+        rawLines: params.lines.map((l, idx) =>
+          l.debitUsd > 0 || l.creditUsd > 0
+            ? {
+                id: `jl_man_${Date.now()}_${idx}`,
+                accountCode: l.accountCode,
+                accountName: resolveAccountName(coa, l.accountCode),
+                debitUsd: roundCurrency(Math.max(0, l.debitUsd)),
+                creditUsd: roundCurrency(Math.max(0, l.creditUsd)),
+                memo: l.memo?.trim() || undefined,
+              }
+            : null
+        ),
+        exchangeRate: activeBranch.exchangeRate,
+        postedBy: activeStaff.name,
+      });
+      if (!built) {
+        notify('Manual journal requires at least 2 balanced lines.', 'warning');
+        return false;
+      }
+
+      setState((prev) => {
+        const log = appendAudit(
+          prev,
+          'Manual journal posted',
+          `${entryNo}: ${params.description.trim()} ($${built.totalDebitUsd.toFixed(2)})`
+        );
+        return {
+          ...prev,
+          accounts: coa,
+          journalEntries: [built, ...(prev.journalEntries || [])],
+          nextJournalSeq: jeSeq + 1,
+          auditLogs: [log, ...prev.auditLogs],
+        };
+      });
+      notify(`Posted balanced journal ${entryNo} ($${built.totalDebitUsd.toFixed(2)})!`, 'success');
+      return true;
+    } catch (err) {
+      notify(err instanceof Error ? err.message : 'Journal entry is not balanced.', 'error');
+      return false;
+    }
+  };
+
+  const reverseJournalEntry: PosContextValue['reverseJournalEntry'] = (entryId, reason) => {
+    if (isSuperAdmin(activeStaff)) return false;
+    const orig = (state.journalEntries || []).find((e) => e.id === entryId);
+    if (!orig || orig.reversed) {
+      notify('This journal entry has already been reversed.', 'warning');
+      return false;
+    }
+
+    const coa =
+      state.accounts && state.accounts.length > 0
+        ? state.accounts
+        : createDefaultChartOfAccounts();
+    const jeSeq = state.nextJournalSeq || (state.journalEntries?.length || 0) + 1;
+    const revJe = buildReversalJournal({
+      entryNo: `JE-2026-${String(jeSeq).padStart(4, '0')}`,
+      original: orig,
+      accounts: coa,
+      postedBy: activeStaff.name,
+      reason,
+    });
+    if (!revJe) return false;
+
+    setState((prev) => {
+      const log = appendAudit(
+        prev,
+        'Journal entry reversed',
+        `Reversed ${orig.entryNo} via ${revJe.entryNo}`,
+        'warning'
+      );
+      return {
+        ...prev,
+        accounts: coa,
+        journalEntries: [
+          revJe,
+          ...(prev.journalEntries || []).map((e) =>
+            e.id === entryId ? { ...e, reversed: true } : e
+          ),
+        ],
+        nextJournalSeq: jeSeq + 1,
+        auditLogs: [log, ...prev.auditLogs],
+      };
+    });
+    notify(`Reversed ${orig.entryNo} via ${revJe.entryNo}.`, 'info');
+    return true;
   };
 
   const value: PosContextValue = {
@@ -2766,13 +4125,28 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     deleteTenantWorkspace,
     startDemoPreset,
     staffSignIn,
+    staffSignInRemote,
     exitToWelcome,
     firebaseUser,
+    saasUser: firebaseUser,
     shopId,
     authLoading,
     cloudStatus,
+    sseConnected,
+    loginWithEmailPassword,
+    registerWithEmailPassword,
+    resetSaasPassword,
     signInWithGoogle,
     signOutGoogle,
+    toasts,
+    notify,
+    dismissToast,
+    setOrderGuests,
+    cancelEmptyOrder,
+    voidOrder,
+    addLoyaltyMember,
+    toggleTenantFeatureFlag,
+    reloadTenantsFromSqlite,
     selectedTableId,
     setSelectedTableId,
     activeOrderId,
@@ -2848,6 +4222,17 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     syncOfflineBills,
     setDisplayOrder,
     resetDemoData,
+    saveSupplier,
+    deleteSupplier,
+    createPurchaseOrder,
+    autoDraftLowStockPurchaseOrders,
+    updatePurchaseOrderStatus,
+    receivePurchaseOrder,
+    payPurchaseOrder,
+    saveLedgerAccount,
+    recordOperatingExpense,
+    postManualJournalEntry,
+    reverseJournalEntry,
   };
 
   return <PosContext.Provider value={value}>{children}</PosContext.Provider>;

@@ -1,15 +1,41 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { ArrowLeft, Bell, Receipt, Plus, Minus, ShoppingBag, Users, CheckCircle2 } from 'lucide-react';
 import { usePos } from '../context/PosContext';
 import { I18N } from '../data/i18n';
 import type { LanguageCode, MenuItem } from '../types/pos';
 import { usdToKhr } from '../utils/posMath';
+import { submitPublicServiceAlertToSqlite } from '../lib/sqliteClient';
 
 export function GuestQrView() {
-  const { state, activeBranch, language, setLanguage, submitGuestQrOrder, setExternalMode } = usePos();
+  const { state, activeTenantId, activeBranch, language, setLanguage, submitGuestQrOrder, setExternalMode } = usePos();
   const t = I18N[language];
   const branchTables = state.tables.filter((tb) => tb.branchId === activeBranch.id);
-  const [selectedTableId, setSelectedTableId] = useState<string>(branchTables[2]?.id || '');
+  const [selectedTableId, setSelectedTableId] = useState<string>(() => {
+    const params = new URLSearchParams(window.location.search);
+    const tableParam = params.get('table');
+    if (tableParam) {
+      if (tableParam.toLowerCase() === 'counter') return '';
+      const match = branchTables.find(
+        (tb) => tb.name.toLowerCase() === tableParam.toLowerCase() || tb.id === tableParam
+      );
+      if (match) return match.id;
+    }
+    return branchTables[2]?.id || branchTables[0]?.id || '';
+  });
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const tableParam = params.get('table');
+    if (!tableParam) return;
+    if (tableParam.toLowerCase() === 'counter') {
+      setSelectedTableId('');
+      return;
+    }
+    const match = branchTables.find(
+      (tb) => tb.name.toLowerCase() === tableParam.toLowerCase() || tb.id === tableParam
+    );
+    if (match) setSelectedTableId(match.id);
+  }, [activeBranch.id]);
   const [category, setCategory] = useState('All');
   const [cart, setCart] = useState<{ item: MenuItem; qty: number }[]>([]);
   const [note, setNote] = useState('');
@@ -129,7 +155,14 @@ export function GuestQrView() {
           <div className="grid grid-cols-3 gap-2 text-xs font-semibold">
             <button
               type="button"
-              onClick={() => setServiceAlert('Staff notified for your table.')}
+              onClick={() => {
+                setServiceAlert('Staff notified for your table.');
+                void submitPublicServiceAlertToSqlite(activeTenantId, {
+                  branchId: activeBranch.id,
+                  tableName: selectedTable ? selectedTable.name : 'Counter QR',
+                  alertType: 'call_staff',
+                }).catch(() => undefined);
+              }}
               className="inline-flex items-center justify-center gap-1 rounded-lg border border-slate-200 bg-slate-50 py-2 text-slate-800 hover:bg-slate-100"
             >
               <Bell className="h-3.5 w-3.5 text-amber-600" />
@@ -137,7 +170,14 @@ export function GuestQrView() {
             </button>
             <button
               type="button"
-              onClick={() => setServiceAlert('Bill requested — cashier notified.')}
+              onClick={() => {
+                setServiceAlert('Bill requested — cashier notified.');
+                void submitPublicServiceAlertToSqlite(activeTenantId, {
+                  branchId: activeBranch.id,
+                  tableName: selectedTable ? selectedTable.name : 'Counter QR',
+                  alertType: 'ask_bill',
+                }).catch(() => undefined);
+              }}
               className="inline-flex items-center justify-center gap-1 rounded-lg border border-slate-200 bg-slate-50 py-2 text-slate-800 hover:bg-slate-100"
             >
               <Receipt className="h-3.5 w-3.5 text-emerald-700" />

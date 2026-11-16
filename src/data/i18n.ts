@@ -10,11 +10,14 @@ export interface Translations {
   reports: string;
   menuPrices: string;
   stock: string;
+  purchaseOrders: string;
   tablesAreas: string;
   promotion: string;
+  accounting: string;
   staff: string;
   salesBook: string;
   chain: string;
+  saasHub: string;
   auditLog: string;
   planBilling: string;
   settings: string;
@@ -52,11 +55,14 @@ export const I18N: Record<LanguageCode, Translations> = {
     reports: 'Reports',
     menuPrices: 'Menu & prices',
     stock: 'Stock',
+    purchaseOrders: 'Purchase orders',
     tablesAreas: 'Tables & areas',
     promotion: 'Promotion',
+    accounting: 'Accounting',
     staff: 'Staff',
     salesBook: 'Sales book',
-    chain: 'Chain',
+    chain: 'Chain & Tenants',
+    saasHub: 'SQLite & SaaS',
     auditLog: 'Audit log',
     planBilling: 'Plan & billing',
     settings: 'Settings',
@@ -92,11 +98,14 @@ export const I18N: Record<LanguageCode, Translations> = {
     reports: 'របាយការណ៍',
     menuPrices: 'ម៉ឺនុយ និងតម្លៃ',
     stock: 'ស្តុកទំនិញ',
+    purchaseOrders: 'បញ្ជាទិញទំនិញ (PO)',
     tablesAreas: 'តុ និងតំបន់',
     promotion: 'ប្រូម៉ូសិន',
+    accounting: 'គណនេយ្យ និងហិរញ្ញវត្ថុ',
     staff: 'បុគ្គលិក',
     salesBook: 'សៀវភៅលក់ VAT',
     chain: 'សាខាទាំងអស់',
+    saasHub: 'មូលដ្ឋានទិន្នន័យ SQLite',
     auditLog: 'កំណត់ត្រាសកម្មភាព',
     planBilling: 'គម្រោង និងការបង់',
     settings: 'ការកំណត់',
@@ -132,11 +141,14 @@ export const I18N: Record<LanguageCode, Translations> = {
     reports: 'Báo cáo',
     menuPrices: 'Thực đơn & giá',
     stock: 'Kho & công thức',
+    purchaseOrders: 'Đơn mua hàng (PO)',
     tablesAreas: 'Bàn & khu vực',
     promotion: 'Khuyến mãi',
+    accounting: 'Kế toán & Sổ cái',
     staff: 'Nhân viên',
     salesBook: 'Sổ bán hàng VAT',
     chain: 'Chuỗi chi nhánh',
+    saasHub: 'SQLite & SaaS',
     auditLog: 'Nhật ký kiểm tra',
     planBilling: 'Gói & thanh toán',
     settings: 'Cài đặt',
@@ -176,11 +188,14 @@ export function getNavLabel(section: NavSection, lang: LanguageCode): string {
     reports: t.reports,
     menu_prices: t.menuPrices,
     stock: t.stock,
+    purchase_orders: t.purchaseOrders,
     tables_areas: t.tablesAreas,
     promotion: t.promotion,
+    accounting: t.accounting,
     staff: t.staff,
     sales_book: t.salesBook,
     chain: t.chain,
+    saas_hub: t.saasHub,
     audit_log: t.auditLog,
     plan_billing: t.planBilling,
     settings: t.settings,

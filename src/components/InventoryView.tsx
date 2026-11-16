@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Package, Plus, Trash2, ClipboardCheck, ChefHat, DollarSign } from 'lucide-react';
 import { usePos } from '../context/PosContext';
 import { roundCurrency } from '../utils/posMath';
@@ -37,6 +37,12 @@ export function InventoryView() {
   // Recipe editor
   const branchMenu = state.menuItems.filter((m) => m.branchId === activeBranch.id);
   const [recipeMenuId, setRecipeMenuId] = useState<string>(branchMenu[0]?.id || '');
+
+  useEffect(() => {
+    if (!branchMenu.some((m) => m.id === recipeMenuId)) {
+      setRecipeMenuId(branchMenu[0]?.id || '');
+    }
+  }, [activeBranch.id, branchMenu, recipeMenuId]);
 
   const branchIngredients = useMemo(() => {
     return state.ingredients

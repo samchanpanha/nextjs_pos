@@ -24,6 +24,7 @@ import {
   Lock,
   FileText,
   Ban,
+  Pencil,
 } from 'lucide-react';
 import { usePos } from '../context/PosContext';
 import { MENU_IMAGE_PRESETS } from '../data/seedData';
@@ -613,6 +614,7 @@ export function MenuManagementView() {
 
 export function TablesAreasView() {
   const { state, activeBranch, saveTable, deleteTable, setExternalMode } = usePos();
+  const [editingTableId, setEditingTableId] = useState<string | null>(null);
   const [name, setName] = useState('');
   const [area, setArea] = useState<PosTable['area']>('Indoor');
   const [seats, setSeats] = useState('4');
@@ -622,8 +624,15 @@ export function TablesAreasView() {
   const handleAddTable = (e: React.FormEvent) => {
     e.preventDefault();
     if (!name.trim()) return;
-    saveTable({ name: name.trim(), area, seats: Math.max(1, Number(seats) || 4) });
+    saveTable({
+      id: editingTableId || undefined,
+      name: name.trim(),
+      area,
+      seats: Math.max(1, Number(seats) || 4),
+    });
+    setEditingTableId(null);
     setName('');
+    setSeats('4');
   };
 
   return (
@@ -695,8 +704,21 @@ export function TablesAreasView() {
           type="submit"
           className="inline-flex items-center gap-1 rounded-lg bg-emerald-800 px-4 py-1.5 font-semibold text-white"
         >
-          <Plus className="h-3.5 w-3.5" /> Add Table
+          <Plus className="h-3.5 w-3.5" /> {editingTableId ? 'Save Changes' : 'Add Table'}
         </button>
+        {editingTableId && (
+          <button
+            type="button"
+            onClick={() => {
+              setEditingTableId(null);
+              setName('');
+              setSeats('4');
+            }}
+            className="rounded-lg border border-slate-300 px-3 py-1.5 font-semibold text-slate-600 hover:bg-slate-50"
+          >
+            Cancel
+          </button>
+        )}
       </form>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
@@ -726,13 +748,27 @@ export function TablesAreasView() {
             />
             <div className="no-print mt-2.5 w-full flex items-center justify-between text-[11px]">
               <span className="capitalize text-slate-500">{t.status}</span>
-              <button
-                type="button"
-                onClick={() => deleteTable(t.id)}
-                className="text-red-600 hover:underline inline-flex items-center gap-0.5"
-              >
-                <Trash2 className="h-3 w-3" /> Remove
-              </button>
+              <div className="inline-flex items-center gap-2.5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditingTableId(t.id);
+                    setName(t.name);
+                    setArea(t.area);
+                    setSeats(String(t.seats));
+                  }}
+                  className="text-emerald-800 font-semibold hover:underline inline-flex items-center gap-0.5"
+                >
+                  <Pencil className="h-3 w-3" /> Edit
+                </button>
+                <button
+                  type="button"
+                  onClick={() => deleteTable(t.id)}
+                  className="text-red-600 hover:underline inline-flex items-center gap-0.5"
+                >
+                  <Trash2 className="h-3 w-3" /> Remove
+                </button>
+              </div>
             </div>
           </div>
         ))}
@@ -1043,6 +1079,8 @@ export function StaffView() {
                       { key: 'settings', label: 'Settings' },
                       { key: 'permissions_grant', label: 'Grant Staff' },
                       { key: 'staff', label: 'Staff' },
+                      { key: 'purchase_orders', label: 'POs' },
+                      { key: 'accounting', label: 'Accounting' },
                       { key: 'reports', label: 'Reports' },
                       { key: 'stock', label: 'Stock' },
                       { key: 'chain', label: 'Chain' },
@@ -1383,6 +1421,26 @@ export function StaffView() {
                   <button
                     type="button"
                     onClick={() => {
+                      const nextPin = window.prompt(
+                        `Enter new 4-digit PIN for ${selectedMember.name}:`,
+                        selectedMember.pin
+                      );
+                      if (!nextPin) return;
+                      const cleanPin = nextPin.replace(/\D/g, '').slice(0, 4);
+                      if (cleanPin.length !== 4) {
+                        setFeedback('PIN must be exactly 4 digits.');
+                        return;
+                      }
+                      saveStaffMember({ ...selectedMember, pin: cleanPin }, effectiveTenantId);
+                      setFeedback(`Updated PIN for ${selectedMember.name} to ${cleanPin}.`);
+                    }}
+                    className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 font-semibold text-slate-700 hover:bg-slate-50"
+                  >
+                    Change PIN
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
                       const defaults = [...(DEFAULT_ROLE_PERMISSIONS[selectedMember.role] || [])];
                       if (updateStaffPermissions(selectedMember.id, defaults, effectiveTenantId)) {
                         setFeedback(`Reset ${selectedMember.name} to ${selectedMember.roleLabel} defaults.`);
@@ -1581,6 +1639,7 @@ export function ChainView() {
   } = usePos();
   const [name, setName] = useState('');
   const [code, setCode] = useState('');
+  const [cloneFromCurrent, setCloneFromCurrent] = useState(true);
   const [registerOpen, setRegisterOpen] = useState(false);
   const [chainFeedback, setChainFeedback] = useState('');
   const isAdminActor = canManageOwnerGrants(activeStaff);
@@ -1591,7 +1650,7 @@ export function ChainView() {
   const handleAdd = (e: React.FormEvent) => {
     e.preventDefault();
     if (!name.trim() || !code.trim()) return;
-    addBranch(name.trim(), code.trim());
+    addBranch(name.trim(), code.trim(), undefined, cloneFromCurrent);
     setName('');
     setCode('');
   };
@@ -1822,79 +1881,90 @@ export function ChainView() {
         </div>
       </div>
 
-      {/* Branches in Active Tenant */}
-      <div className="space-y-3 pt-2 border-t border-slate-200">
-        <h2 className="text-sm font-bold text-slate-900">Branches in {state.shopName}</h2>
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {state.branches.map((b) => {
-            const branchOrders = state.orders.filter(
-              (o) => o.branchId === b.id && o.status === 'paid'
-            );
-            const rev = branchOrders.reduce((s, o) => s + o.totalUsd, 0);
-            const isCurrent = b.id === activeBranch.id;
-            return (
-              <div
-                key={b.id}
-                className={`rounded-xl border bg-white p-4 space-y-2 ${
-                  isCurrent ? 'border-emerald-700 ring-1 ring-emerald-700' : 'border-slate-200'
-                }`}
-              >
-                <div className="flex items-center justify-between">
-                  <span className="inline-flex items-center gap-1.5 text-sm font-bold text-slate-900">
-                    <Building2 className="h-4 w-4 text-emerald-800" />
-                    {b.name}
-                  </span>
-                  <span className="font-mono text-xs font-semibold text-slate-500">{b.code}</span>
+      {/* Branches in Active Tenant (Store Users only; disabled for Platform Super Admin) */}
+      {!isAdminActor && (
+        <div className="space-y-3 pt-2 border-t border-slate-200">
+          <h2 className="text-sm font-bold text-slate-900">Branches in {state.shopName}</h2>
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {state.branches.map((b) => {
+              const branchOrders = state.orders.filter(
+                (o) => o.branchId === b.id && o.status === 'paid'
+              );
+              const rev = branchOrders.reduce((s, o) => s + o.totalUsd, 0);
+              const isCurrent = b.id === activeBranch.id;
+              return (
+                <div
+                  key={b.id}
+                  className={`rounded-xl border bg-white p-4 space-y-2 ${
+                    isCurrent ? 'border-emerald-700 ring-1 ring-emerald-700' : 'border-slate-200'
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="inline-flex items-center gap-1.5 text-sm font-bold text-slate-900">
+                      <Building2 className="h-4 w-4 text-emerald-800" />
+                      {b.name}
+                    </span>
+                    <span className="font-mono text-xs font-semibold text-slate-500">{b.code}</span>
+                  </div>
+                  <p className="text-xs text-slate-500">{b.address}</p>
+                  <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-xs">
+                    <span className="tabular-nums font-bold text-slate-900">
+                      ${rev.toFixed(2)} ({branchOrders.length} bills)
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => switchBranch(b.id)}
+                      className={`rounded-lg px-3 py-1 font-semibold ${
+                        isCurrent
+                          ? 'bg-emerald-800 text-white'
+                          : 'border border-slate-300 text-slate-700 hover:bg-slate-50'
+                      }`}
+                    >
+                      {isCurrent ? 'Active' : 'Switch'}
+                    </button>
+                  </div>
                 </div>
-                <p className="text-xs text-slate-500">{b.address}</p>
-                <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-xs">
-                  <span className="tabular-nums font-bold text-slate-900">
-                    ${rev.toFixed(2)} ({branchOrders.length} bills)
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => switchBranch(b.id)}
-                    className={`rounded-lg px-3 py-1 font-semibold ${
-                      isCurrent
-                        ? 'bg-emerald-800 text-white'
-                        : 'border border-slate-300 text-slate-700 hover:bg-slate-50'
-                    }`}
-                  >
-                    {isCurrent ? 'Active' : 'Switch'}
-                  </button>
-                </div>
-              </div>
-            );
-          })}
+              );
+            })}
 
-          <form
-            onSubmit={handleAdd}
-            className="rounded-xl border border-dashed border-slate-300 bg-white p-4 space-y-2.5 text-xs"
-          >
-            <h3 className="text-sm font-bold text-slate-900">Add new branch</h3>
-            <input
-              required
-              placeholder="Branch name (e.g. Lotus Toul Kork)"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              className="w-full rounded-lg border border-slate-300 px-3 py-2"
-            />
-            <input
-              required
-              placeholder="Code (e.g. TK3)"
-              value={code}
-              onChange={(e) => setCode(e.target.value)}
-              className="w-full rounded-lg border border-slate-300 px-3 py-2 font-mono uppercase"
-            />
-            <button
-              type="submit"
-              className="w-full rounded-lg bg-emerald-800 py-2 font-semibold text-white"
+            <form
+              onSubmit={handleAdd}
+              className="rounded-xl border border-dashed border-slate-300 bg-white p-4 space-y-2.5 text-xs"
             >
-              Create Branch
-            </button>
-          </form>
+              <h3 className="text-sm font-bold text-slate-900">Add new branch</h3>
+              <input
+                required
+                placeholder="Branch name (e.g. Lotus Toul Kork)"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                className="w-full rounded-lg border border-slate-300 px-3 py-2"
+              />
+              <input
+                required
+                placeholder="Code (e.g. TK3)"
+                value={code}
+                onChange={(e) => setCode(e.target.value)}
+                className="w-full rounded-lg border border-slate-300 px-3 py-2 font-mono uppercase"
+              />
+              <label className="flex items-center gap-2 text-xs text-slate-700 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={cloneFromCurrent}
+                  onChange={(e) => setCloneFromCurrent(e.target.checked)}
+                  className="rounded border-slate-300 text-emerald-700 focus:ring-emerald-700"
+                />
+                <span>Clone menu, tables &amp; ingredients from {activeBranch.code}</span>
+              </label>
+              <button
+                type="submit"
+                className="w-full rounded-lg bg-emerald-800 py-2 font-semibold text-white"
+              >
+                Create Branch
+              </button>
+            </form>
+          </div>
         </div>
-      </div>
+      )}
 
       <TenantRegistrationModal open={registerOpen} onClose={() => setRegisterOpen(false)} />
     </div>
@@ -2135,6 +2205,8 @@ export function SettingsView() {
     updateBranchSettingsForTenant,
     resetDemoData,
     platformSettings,
+    setDemoUsersDisabled,
+    setNavSection,
   } = usePos();
   const isAdminActor = canManageOwnerGrants(activeStaff);
   const canEdit = canEditSettings(activeStaff, state.ownerPermissions);
@@ -2236,6 +2308,85 @@ export function SettingsView() {
       updatedAt: new Date().toISOString(),
     };
   }, [effectiveTenantState.orders, effectiveTenantState.nextOrderNumber, effectiveBranch.id, activeStaff.name]);
+
+  if (isAdminActor) {
+    return (
+      <div className="p-4 sm:p-6 max-w-4xl mx-auto space-y-5">
+        <div>
+          <h1 className="text-xl font-bold text-slate-900">
+            SaaS Platform Governance &amp; Privacy Policy
+          </h1>
+          <p className="text-xs text-slate-500">
+            Super Admin controls SaaS-wide security, demo sandbox availability, and tenant feature boundaries. Individual store operational settings (POS rates, store KHQR, receipts, POs, and accounting) are strictly isolated to each Tenant Owner.
+          </p>
+        </div>
+
+        <div className="rounded-2xl border border-slate-200 bg-white p-5 space-y-4 text-xs">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 pb-4">
+            <div>
+              <div className="text-sm font-bold text-slate-900">
+                Strict Store Data Isolation (Active)
+              </div>
+              <p className="text-slate-500 mt-0.5">
+                Tenant POS orders, customer CRM, ingredient stock, Purchase Orders, and double-entry General Ledgers are disabled and redacted for Super Admin across both SQLite APIs and client UI.
+              </p>
+            </div>
+            <span className="rounded-lg bg-emerald-100 px-3 py-1 font-bold text-emerald-900">
+              ENFORCED
+            </span>
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 pb-4">
+            <div>
+              <div className="text-sm font-bold text-slate-900">
+                User Demo Store Sandbox (Lotus Café BKK1)
+              </div>
+              <p className="text-slate-500 mt-0.5">
+                Dedicated evaluation store (<code className="font-mono">owner@lotuscafe.kh</code> / <code className="font-mono">guide_chu</code>) allowing store users to test POS, KDS, Purchase Orders, and all 6 Financial Statements without affecting live merchants.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setDemoUsersDisabled(!platformSettings.demoUsersDisabled)}
+              className={`rounded-lg px-3.5 py-2 font-semibold ${
+                platformSettings.demoUsersDisabled
+                  ? 'bg-emerald-800 text-white hover:bg-emerald-900'
+                  : 'border border-amber-300 bg-amber-50 text-amber-950 hover:bg-amber-100'
+              }`}
+            >
+              {platformSettings.demoUsersDisabled
+                ? 'Enable User Demo Store'
+                : 'Disable User Demo Store'}
+            </button>
+          </div>
+
+          <div className="flex flex-wrap gap-2 pt-1">
+            <button
+              type="button"
+              onClick={() => setNavSection('saas_hub')}
+              className="rounded-lg bg-slate-900 px-3.5 py-2 font-semibold text-white hover:bg-slate-800"
+            >
+              Open SQLite &amp; Feature Flag Hub →
+            </button>
+            <button
+              type="button"
+              onClick={() => setNavSection('chain')}
+              className="rounded-lg border border-slate-300 px-3.5 py-2 font-semibold text-slate-800 hover:bg-slate-50"
+            >
+              Manage Tenants &amp; Subscriptions →
+            </button>
+            <button
+              type="button"
+              onClick={() => setNavSection('staff')}
+              className="rounded-lg border border-slate-300 px-3.5 py-2 font-semibold text-slate-800 hover:bg-slate-50"
+            >
+              Manage Tenant Role Permissions →
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   if (!canEdit) {
     return (

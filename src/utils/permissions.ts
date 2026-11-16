@@ -72,6 +72,12 @@ export const PERMISSION_DEFINITIONS: PermissionMeta[] = [
     group: 'catalog_stock',
   },
   {
+    key: 'purchase_orders',
+    label: 'Purchase Orders (PO)',
+    description: 'Create supplier POs, auto-draft low-stock restocks, receive GRNs, and pay vendor bills.',
+    group: 'catalog_stock',
+  },
+  {
     key: 'tables_areas',
     label: 'Tables & Areas',
     description: 'Edit floor plan zones, tables, and guest QR links.',
@@ -85,6 +91,12 @@ export const PERMISSION_DEFINITIONS: PermissionMeta[] = [
   },
 
   // Finance & Compliance
+  {
+    key: 'accounting',
+    label: 'Accounting & Financial Reports',
+    description: 'Double-entry ledger, Chart of Accounts, P&L, Balance Sheet, Cash Flow, Trial Balance & GDT Tax.',
+    group: 'finance',
+  },
   {
     key: 'reports',
     label: 'Analytics & Reports',
@@ -121,6 +133,12 @@ export const PERMISSION_DEFINITIONS: PermissionMeta[] = [
     key: 'chain',
     label: 'Tenants & Branches',
     description: 'Switch/add branches and view multi-tenant workspaces.',
+    group: 'admin_settings',
+  },
+  {
+    key: 'saas_hub',
+    label: 'SQLite & SaaS Modules Hub',
+    description: 'Inspect SQLite database health, backups, feature flags, and modular SaaS architecture.',
     group: 'admin_settings',
   },
   {
@@ -162,8 +180,10 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<StaffRole, PermissionKey[]> = {
     'bills',
     'shift_drawer',
     'reports',
+    'accounting',
     'menu_prices',
     'stock',
+    'purchase_orders',
     'tables_areas',
     'promotion',
     'sales_book',
@@ -250,11 +270,37 @@ export function hasPermission(
   return getEffectivePermissions(member, tenantOwnerPermissions).includes(perm);
 }
 
+/**
+ * Strict Platform-Only Super Admin Plane:
+ * Super Admin (`role === 'admin'`) manages SaaS infrastructure, tenant lifecycle,
+ * role/owner permission grants, and SQLite health ONLY.
+ * Store operational data (POS orders, KDS, inventory, POs, accounting ledgers, bills)
+ * is strictly disabled on Super Admin accounts for tenant privacy.
+ */
+export const ADMIN_PLATFORM_NAV_SECTIONS: NavSection[] = [
+  'saas_hub',
+  'chain',
+  'staff',
+  'settings',
+];
+
+const ADMIN_PLATFORM_NAV_SET = new Set<NavSection>(ADMIN_PLATFORM_NAV_SECTIONS);
+
+export function isPlatformOnlyAdmin(
+  member?: Pick<StaffMember, 'role' | 'active'> | null
+): boolean {
+  return isSuperAdmin(member);
+}
+
 export function canAccessNavSection(
   member: Pick<StaffMember, 'role' | 'active' | 'permissions'> | null | undefined,
   section: NavSection,
   tenantOwnerPermissions?: PermissionKey[]
 ): boolean {
+  if (!member || !member.active) return false;
+  if (member.role === 'admin') {
+    return ADMIN_PLATFORM_NAV_SET.has(section);
+  }
   return hasPermission(member, section, tenantOwnerPermissions);
 }
 
@@ -323,14 +369,17 @@ const NAV_PRIORITY: NavSection[] = [
   'bills',
   'reservations',
   'shift_drawer',
+  'accounting',
   'reports',
   'menu_prices',
   'stock',
+  'purchase_orders',
   'tables_areas',
   'promotion',
   'sales_book',
   'staff',
   'chain',
+  'saas_hub',
   'audit_log',
   'plan_billing',
   'settings',
@@ -340,6 +389,9 @@ export function getFirstAllowedNavSection(
   member: Pick<StaffMember, 'role' | 'active' | 'permissions'> | null | undefined,
   tenantOwnerPermissions?: PermissionKey[]
 ): NavSection {
+  if (isSuperAdmin(member)) {
+    return 'saas_hub';
+  }
   for (const sec of NAV_PRIORITY) {
     if (canAccessNavSection(member, sec, tenantOwnerPermissions)) {
       return sec;

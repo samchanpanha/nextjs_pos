@@ -11,6 +11,8 @@ import {
   Scissors,
   Trash2,
   Calendar,
+  ShoppingCart,
+  X,
 } from 'lucide-react';
 import { usePos } from '../context/PosContext';
 import { I18N } from '../data/i18n';
@@ -37,12 +39,18 @@ export function SellView() {
     clearDraftItems,
     sendOrderToKitchen,
     voidOrderItem,
+    setOrderGuests,
+    cancelEmptyOrder,
+    voidOrder,
     moveOrderToTable,
     splitOrderItems,
   } = usePos();
 
   const t = I18N[language];
   const [subTab, setSubTab] = useState<'tables' | 'menu'>('tables');
+  const [mobileCartOpen, setMobileCartOpen] = useState(false);
+  const [voidOrderModalOpen, setVoidOrderModalOpen] = useState(false);
+  const [voidOrderReason, setVoidOrderReason] = useState('Customer cancelled');
   const [tableFilter, setTableFilter] = useState<'all' | 'occupied' | 'free'>('all');
   const [areaFilter, setAreaFilter] = useState<string>('Indoor');
   const [typeFilter, setTypeFilter] = useState<'all' | 'product' | 'service'>('all');
@@ -240,7 +248,7 @@ export function SellView() {
 
         {/* TABLES VIEW */}
         {subTab === 'tables' && (
-          <div className="flex-1 flex flex-col gap-3">
+          <div className="flex-1 min-h-0 overflow-y-auto pr-1 flex flex-col gap-3">
             {/* Area tabs + Quick Takeaway channels */}
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex flex-wrap items-center gap-1.5">
@@ -398,7 +406,7 @@ export function SellView() {
 
         {/* MENU VIEW */}
         {subTab === 'menu' && (
-          <div className="flex-1 flex flex-col gap-3">
+          <div className="flex-1 min-h-0 overflow-y-auto pr-1 flex flex-col gap-3">
             {/* Item Type Filter + Categories */}
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="inline-flex rounded-lg border border-slate-200 bg-white p-0.5 text-xs font-semibold">
@@ -514,8 +522,36 @@ export function SellView() {
         )}
       </div>
 
+      {/* Sticky Mobile Cart Bar (< lg) */}
+      {activeOrder && !mobileCartOpen && (
+        <div className="lg:hidden fixed bottom-14 inset-x-3 z-30">
+          <button
+            type="button"
+            onClick={() => setMobileCartOpen(true)}
+            className="w-full flex items-center justify-between rounded-xl bg-[#0A3D31] text-white px-4 py-3 shadow-xl border border-emerald-500/30"
+          >
+            <div className="flex items-center gap-2.5">
+              <ShoppingCart className="h-4 w-4 text-amber-300" />
+              <span className="text-xs font-bold">
+                {activeOrder.tableName} · #{activeOrder.orderNumber} (
+                {activeOrder.items.filter((i) => !i.voided).reduce((s, i) => s + i.qty, 0)} items)
+              </span>
+            </div>
+            <span className="text-sm font-extrabold tabular-nums">
+              ${activeOrder.totalUsd.toFixed(2)} →
+            </span>
+          </button>
+        </div>
+      )}
+
       {/* Right Order Ticket Panel */}
-      <aside className="w-full lg:w-[370px] shrink-0 min-h-0 border-t lg:border-t-0 lg:border-l border-slate-200 bg-white flex flex-col overflow-hidden">
+      <aside
+        className={`${
+          mobileCartOpen
+            ? 'fixed inset-0 z-40 flex'
+            : 'hidden lg:flex'
+        } w-full lg:w-[370px] shrink-0 min-h-0 border-t lg:border-t-0 lg:border-l border-slate-200 bg-white flex-col overflow-hidden`}
+      >
         {!activeOrder ? (
           <div className="flex-1 flex flex-col items-center justify-center p-8 text-center">
             <div className="h-12 w-12 rounded-xl bg-slate-100 flex items-center justify-center text-slate-400 mb-3">
@@ -542,15 +578,63 @@ export function SellView() {
                   <span className="text-base font-bold text-slate-900">{activeOrder.tableName}</span>
                   <span className="text-xs text-slate-500 font-mono">#{activeOrder.orderNumber}</span>
                 </div>
-                <div className="text-[11px] text-slate-500">
-                  {activeOrder.items.some((i) => i.sentToKitchen)
-                    ? `Round ${activeOrder.currentRound}`
-                    : 'Active order'}{' '}
-                  · {activeOrder.guests} guests
+                <div className="mt-1 flex items-center gap-2 text-[11px] text-slate-500">
+                  <span>
+                    {activeOrder.items.some((i) => i.sentToKitchen)
+                      ? `Round ${activeOrder.currentRound}`
+                      : 'Draft ticket'}
+                  </span>
+                  <span>·</span>
+                  <div className="inline-flex items-center gap-1 rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5">
+                    <Users className="h-3 w-3 text-slate-500" />
+                    <button
+                      type="button"
+                      onClick={() => setOrderGuests(activeOrder.id, activeOrder.guests - 1)}
+                      className="px-1 font-bold text-slate-600 hover:text-slate-900"
+                    >
+                      −
+                    </button>
+                    <span className="font-semibold text-slate-800 tabular-nums">
+                      {activeOrder.guests}g
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setOrderGuests(activeOrder.id, activeOrder.guests + 1)}
+                      className="px-1 font-bold text-slate-600 hover:text-slate-900"
+                    >
+                      +
+                    </button>
+                  </div>
                 </div>
               </div>
 
               <div className="flex items-center gap-1">
+                {!activeOrder.items.some((i) => i.sentToKitchen && !i.voided) ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      cancelEmptyOrder(activeOrder.id);
+                      setMobileCartOpen(false);
+                    }}
+                    title="Cancel empty draft & release table"
+                    className="rounded-lg border border-slate-200 px-2 py-1 text-[11px] font-semibold text-slate-600 hover:bg-red-50 hover:text-red-700 hover:border-red-200"
+                  >
+                    Release
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setVoidPin('');
+                      setVoidError('');
+                      setVoidOrderModalOpen(true);
+                    }}
+                    title="Void entire order (Manager PIN)"
+                    className="rounded-lg border border-red-200 bg-red-50/70 p-1.5 text-red-700 hover:bg-red-100"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                )}
                 {activeOrder.tableId && (
                   <button
                     type="button"
@@ -574,6 +658,16 @@ export function SellView() {
                     className="rounded-lg border border-slate-200 p-1.5 text-slate-600 hover:bg-slate-50"
                   >
                     <Scissors className="h-3.5 w-3.5" />
+                  </button>
+                )}
+                {mobileCartOpen && (
+                  <button
+                    type="button"
+                    onClick={() => setMobileCartOpen(false)}
+                    aria-label="Close mobile cart"
+                    className="lg:hidden rounded-lg border border-slate-200 p-1.5 text-slate-600"
+                  >
+                    <X className="h-3.5 w-3.5" />
                   </button>
                 )}
               </div>
@@ -966,6 +1060,67 @@ export function SellView() {
                 className="rounded-lg bg-red-600 px-4 py-1.5 text-xs font-semibold text-white"
               >
                 Void item
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Void Entire Order Modal */}
+      {voidOrderModalOpen && activeOrder && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Void entire order"
+        >
+          <div className="w-full max-w-sm rounded-xl border border-slate-200 bg-white p-5 shadow-xl space-y-3">
+            <h3 className="text-base font-bold text-slate-900">
+              Void Entire Order #{activeOrder.orderNumber}
+            </h3>
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">Reason</label>
+              <input
+                type="text"
+                value={voidOrderReason}
+                onChange={(e) => setVoidOrderReason(e.target.value)}
+                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">
+                Manager / Owner PIN
+              </label>
+              <input
+                type="password"
+                value={voidPin}
+                onChange={(e) => setVoidPin(e.target.value)}
+                placeholder="e.g. 2222 or 1111"
+                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm font-mono"
+              />
+            </div>
+            {voidError && <p className="text-xs text-red-600">{voidError}</p>}
+            <div className="flex justify-end gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setVoidOrderModalOpen(false)}
+                className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const ok = voidOrder(activeOrder.id, voidOrderReason, voidPin);
+                  if (!ok) setVoidError('Invalid Manager/Owner PIN');
+                  else {
+                    setVoidOrderModalOpen(false);
+                    setMobileCartOpen(false);
+                  }
+                }}
+                className="rounded-lg bg-red-600 px-4 py-1.5 text-xs font-semibold text-white"
+              >
+                Void Entire Bill
               </button>
             </div>
           </div>

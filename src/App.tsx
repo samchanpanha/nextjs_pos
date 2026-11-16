@@ -23,31 +23,41 @@ import {
   TablesAreasView,
 } from './components/ManagementViews';
 import { ReceiptModal } from './components/ReceiptModal';
+import { SaasPlatformHubView } from './components/SaasPlatformHubView';
+import { PurchaseOrdersView } from './components/PurchaseOrdersView';
+import { AccountingView } from './components/AccountingView';
+import { canAccessNavSection, isPlatformOnlyAdmin } from './utils/permissions';
 
 function PosRouter() {
   const {
+    state,
     isEnteredPos,
     externalMode,
     navSection,
     receiptOrder,
     setReceiptOrder,
     activeBranch,
+    activeStaff,
   } = usePos();
 
-  if (externalMode === 'kds') {
-    return <KdsView standalone />;
-  }
-  if (externalMode === 'display') {
-    return <CustomerDisplayView />;
-  }
-  if (externalMode === 'qr') {
-    return <GuestQrView />;
-  }
-  if (externalMode === 'group') {
-    return <GroupOrderView />;
-  }
-  if (externalMode === 'book') {
-    return <OnlineBookingView />;
+  const isAdminOnly = isEnteredPos && isPlatformOnlyAdmin(activeStaff);
+
+  if (!isAdminOnly) {
+    if (externalMode === 'kds') {
+      return <KdsView standalone />;
+    }
+    if (externalMode === 'display') {
+      return <CustomerDisplayView />;
+    }
+    if (externalMode === 'qr') {
+      return <GuestQrView />;
+    }
+    if (externalMode === 'group') {
+      return <GroupOrderView />;
+    }
+    if (externalMode === 'book') {
+      return <OnlineBookingView />;
+    }
   }
 
   if (!isEnteredPos) {
@@ -55,6 +65,10 @@ function PosRouter() {
   }
 
   const renderSection = () => {
+    if (!canAccessNavSection(activeStaff, navSection, state.ownerPermissions)) {
+      return isAdminOnly ? <SaasPlatformHubView /> : <SellView />;
+    }
+
     switch (navSection) {
       case 'sell':
         return <SellView />;
@@ -74,6 +88,8 @@ function PosRouter() {
         return <MenuManagementView />;
       case 'stock':
         return <InventoryView />;
+      case 'purchase_orders':
+        return <PurchaseOrdersView />;
       case 'tables_areas':
         return <TablesAreasView />;
       case 'promotion':
@@ -82,8 +98,12 @@ function PosRouter() {
         return <StaffView />;
       case 'sales_book':
         return <SalesBookView />;
+      case 'accounting':
+        return <AccountingView />;
       case 'chain':
         return <ChainView />;
+      case 'saas_hub':
+        return <SaasPlatformHubView />;
       case 'audit_log':
         return <AuditLogView />;
       case 'plan_billing':
@@ -91,7 +111,7 @@ function PosRouter() {
       case 'settings':
         return <SettingsView />;
       default:
-        return <SellView />;
+        return isAdminOnly ? <SaasPlatformHubView /> : <SellView />;
     }
   };
 

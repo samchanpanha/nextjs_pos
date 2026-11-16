@@ -14,9 +14,18 @@ export function PromotionsCustomersView() {
     addPrepaidTemplate,
     sellPrepaidPack,
     voidCustomerPack,
+    addLoyaltyMember,
   } = usePos();
 
   const [subTab, setSubTab] = useState<PromoSubTab>('promotions');
+
+  const catalogCategories = Array.from(
+    new Set(
+      state.menuItems
+        .filter((m) => m.branchId === activeBranch.id)
+        .map((m) => m.category)
+    )
+  );
 
   // New promotion
   const [promoName, setPromoName] = useState('');
@@ -28,9 +37,15 @@ export function PromotionsCustomersView() {
   const [packName, setPackName] = useState('');
   const [packUses, setPackUses] = useState('5');
   const [packPrice, setPackPrice] = useState('9.50');
+  const [packCategories, setPackCategories] = useState<string[]>([]);
   const [sellTplId, setSellTplId] = useState(state.prepaidTemplates[0]?.id || '');
   const [buyerName, setBuyerName] = useState('');
   const [buyerPhone, setBuyerPhone] = useState('');
+
+  // New Loyalty Member enrollment
+  const [memberName, setMemberName] = useState('');
+  const [memberPhone, setMemberPhone] = useState('');
+  const [memberBonusPts, setMemberBonusPts] = useState('20');
 
   // AI Telegram campaign writer
   const [campPromo, setCampPromo] = useState('Happy Hour 14:00–17:00');
@@ -64,10 +79,16 @@ export function PromotionsCustomersView() {
       totalUses: Math.max(1, Number(packUses) || 5),
       priceUsd: Math.max(1, Number(packPrice) || 10),
       validDays: 60,
-      categories: ['Coffee & Drinks'],
+      categories:
+        packCategories.length > 0
+          ? packCategories
+          : catalogCategories.length > 0
+            ? [catalogCategories[0]]
+            : ['Coffee & tea'],
       active: true,
     });
     setPackName('');
+    setPackCategories([]);
   };
 
   const handleSellPack = (e: React.FormEvent) => {
@@ -301,6 +322,34 @@ export function PromotionsCustomersView() {
                   className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs tabular-nums"
                 />
               </div>
+              {catalogCategories.length > 0 && (
+                <div className="space-y-1">
+                  <div className="text-[11px] font-medium text-slate-600">Eligible categories:</div>
+                  <div className="flex flex-wrap gap-1">
+                    {catalogCategories.map((cat) => {
+                      const selected = packCategories.includes(cat);
+                      return (
+                        <button
+                          key={cat}
+                          type="button"
+                          onClick={() =>
+                            setPackCategories((prev) =>
+                              prev.includes(cat) ? prev.filter((c) => c !== cat) : [...prev, cat]
+                            )
+                          }
+                          className={`rounded-md px-2 py-0.5 text-[11px] border ${
+                            selected
+                              ? 'border-emerald-700 bg-emerald-50 text-emerald-900 font-semibold'
+                              : 'border-slate-200 bg-slate-50 text-slate-600'
+                          }`}
+                        >
+                          {cat}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
               <button
                 type="submit"
                 className="w-full rounded-lg border border-slate-300 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50"
@@ -372,6 +421,50 @@ export function PromotionsCustomersView() {
               <span className="font-mono font-semibold">{activeBranch.telegramChannel}</span>
             </div>
           </div>
+
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (!memberName.trim() || !memberPhone.trim()) return;
+              addLoyaltyMember({
+                name: memberName,
+                phone: memberPhone,
+                initialPoints: Number(memberBonusPts) || 0,
+              });
+              setMemberName('');
+              setMemberPhone('');
+            }}
+            className="grid grid-cols-1 sm:grid-cols-4 gap-2 rounded-xl bg-slate-50 border border-slate-200 p-3"
+          >
+            <input
+              required
+              placeholder="Customer full name"
+              value={memberName}
+              onChange={(e) => setMemberName(e.target.value)}
+              className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs"
+            />
+            <input
+              required
+              placeholder="Phone (e.g. 012 888 999)"
+              value={memberPhone}
+              onChange={(e) => setMemberPhone(e.target.value)}
+              className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-mono"
+            />
+            <input
+              type="number"
+              min={0}
+              placeholder="Welcome bonus pts"
+              value={memberBonusPts}
+              onChange={(e) => setMemberBonusPts(e.target.value)}
+              className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs tabular-nums"
+            />
+            <button
+              type="submit"
+              className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-emerald-800 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-900"
+            >
+              <Plus className="h-3.5 w-3.5" /> Enroll Member
+            </button>
+          </form>
           <div className="overflow-x-auto">
             <table className="w-full text-xs">
               <thead>
