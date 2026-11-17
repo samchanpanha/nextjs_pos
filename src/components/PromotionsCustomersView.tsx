@@ -596,7 +596,8 @@ export function PromotionsCustomersView() {
 
                 <div className="flex items-center justify-between pt-1">
                   <span className="text-[11px] text-slate-500">
-                    Silver ≥ $100 spent · Gold ≥ $500 spent
+                    Silver ≥ $100 spent (1.25× earn) · Gold ≥ $500 spent (1.5× earn + 250 pt
+                    bonus)
                   </span>
                   <button
                     type="button"

@@ -154,7 +154,7 @@ export function PayModal({ order, onClose }: PayModalProps) {
         totalUsd: totals.totalUsd,
         pointsPerDollar: activeBranch.pointsPerDollar,
         pointsEnabled: activeBranch.pointsEnabled,
-        offlineMode: state.offlineMode,
+        tier: matchedMember.tier,
       })
     : 0;
   const activeBranchRewards = (state.loyaltyRewards || []).filter(
@@ -184,12 +184,14 @@ export function PayModal({ order, onClose }: PayModalProps) {
       totalUsd: totals.totalUsd,
       pointsPerDollar: activeBranch.pointsPerDollar,
       pointsEnabled: activeBranch.pointsEnabled,
-      offlineMode: state.offlineMode,
+      tier: member.tier,
     });
     notify(
-      state.offlineMode || !activeBranch.pointsEnabled
-        ? `${member.name} attached to this bill.`
-        : `${member.name} attached — ${earn} pts will be added on payment.`,
+      !activeBranch.pointsEnabled
+        ? `${member.name} attached to this bill (points program paused).`
+        : state.offlineMode
+          ? `${member.name} attached — ${earn} pts credited (offline, will sync).`
+          : `${member.name} attached — ${earn} pts will be added on payment.`,
       'success'
     );
   };
@@ -715,11 +717,11 @@ export function PayModal({ order, onClose }: PayModalProps) {
                         </div>
                       </div>
                       <span className="rounded-md bg-emerald-100 px-2 py-0.5 text-[10px] font-bold text-emerald-900 tabular-nums shrink-0">
-                        {state.offlineMode
-                          ? 'Offline (0 pts)'
-                          : activeBranch.pointsEnabled
-                            ? `+${estimatedEarnPoints} pts earn`
-                            : 'Points paused'}
+                        {!activeBranch.pointsEnabled
+                          ? 'Points paused'
+                          : state.offlineMode
+                            ? `+${estimatedEarnPoints} pts (offline)`
+                            : `+${estimatedEarnPoints} pts earn`}
                       </span>
                     </div>
 
