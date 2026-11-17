@@ -17,8 +17,11 @@ import {
   type AiStockMonitorReport,
   type StockUrgencyTier,
 } from '../utils/aiStockMonitor';
-
-const stockMonitorMemoryCache = new Map<string, AiStockMonitorReport>();
+import {
+  getCachedStockMonitorReport,
+  requestStockMonitorReport,
+  stockMonitorMemoryCache,
+} from '../utils/aiStockMonitorClient';
 
 function urgencyBadgeClass(urgency: StockUrgencyTier): string {
   switch (urgency) {
@@ -122,7 +125,7 @@ export function AiStockMonitorPanel({ onRestockIngredient }: AiStockMonitorPanel
       }
 
       if (!forceRefresh) {
-        const cached = stockMonitorMemoryCache.get(fingerprint);
+        const cached = getCachedStockMonitorReport(fingerprint);
         if (cached) {
           setReport(cached);
           setError(null);
@@ -144,26 +147,14 @@ export function AiStockMonitorPanel({ onRestockIngredient }: AiStockMonitorPanel
       setError(null);
 
       try {
-        const res = await fetch('/api/ai/stock-monitor', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ...payloadRef.current, forceRefresh }),
+        const nextReport = await requestStockMonitorReport(payloadRef.current, {
+          forceRefresh,
           signal: controller.signal,
         });
 
-        const data = (await res.json().catch(() => ({}))) as {
-          ok?: boolean;
-          report?: AiStockMonitorReport;
-          error?: string;
-        };
-
-        if (!res.ok || !data.ok || !data.report) {
-          throw new Error(data.error || `AI Stock Monitor request failed (${res.status}).`);
-        }
-
-        stockMonitorMemoryCache.set(fingerprint, data.report);
-        setReport(data.report);
-        dispatchAlertsForReport(data.report, false);
+        stockMonitorMemoryCache.set(fingerprint, nextReport);
+        setReport(nextReport);
+        dispatchAlertsForReport(nextReport, false);
       } catch (err) {
         if ((err as { name?: string })?.name === 'AbortError') {
           if (timedOut) {

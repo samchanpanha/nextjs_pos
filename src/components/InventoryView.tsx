@@ -12,10 +12,12 @@ import {
   Search,
   RotateCcw,
   Sparkles,
+  Truck,
 } from 'lucide-react';
 import { usePos } from '../context/PosContext';
 import { roundCurrency, usdToKhr } from '../utils/posMath';
 import { AiStockMonitorPanel } from './AiStockMonitorPanel';
+import { AutoRestockPanel } from './AutoRestockPanel';
 import {
   areRecipeLinesEqual,
   calculateMenuProfitMargin,
@@ -25,7 +27,7 @@ import {
 } from '../utils/recipeMargin';
 import type { RecipeLine } from '../types/pos';
 
-type StockSubTab = 'stock' | 'ai_monitor' | 'recipes' | 'history' | 'margin';
+type StockSubTab = 'stock' | 'ai_monitor' | 'auto_restock' | 'recipes' | 'history' | 'margin';
 type MarginFilter = 'all' | 'linked' | 'unlinked' | 'low';
 type MarginSort = 'margin_asc' | 'margin_desc' | 'cost_desc' | 'name_asc';
 
@@ -356,6 +358,7 @@ export function InventoryView() {
             [
               { id: 'stock', label: 'Stock' },
               { id: 'ai_monitor', label: 'AI Stock Monitor' },
+              { id: 'auto_restock', label: 'Auto-Restock' },
               { id: 'recipes', label: 'Recipes & margin' },
               { id: 'history', label: 'History' },
               { id: 'margin', label: 'Cost & margin' },
@@ -374,6 +377,7 @@ export function InventoryView() {
               }`}
             >
               {tab.id === 'ai_monitor' && <Sparkles className="h-3.5 w-3.5" />}
+              {tab.id === 'auto_restock' && <Truck className="h-3.5 w-3.5" />}
               <span>{tab.label}</span>
               {tab.id === 'ai_monitor' && branchAiAlerts.length > 0 && (
                 <span
@@ -384,6 +388,17 @@ export function InventoryView() {
                   }`}
                 >
                   {branchAiAlerts.length}
+                </span>
+              )}
+              {tab.id === 'auto_restock' && lowCount > 0 && (
+                <span
+                  className={`rounded-full px-1.5 py-0.5 text-[10px] font-bold tabular-nums ${
+                    subTab === 'auto_restock'
+                      ? 'bg-white/20 text-white'
+                      : 'bg-red-100 text-red-900'
+                  }`}
+                >
+                  {lowCount}
                 </span>
               )}
             </button>
@@ -447,13 +462,28 @@ export function InventoryView() {
                 )}
               </span>
             </div>
-            <button
-              type="button"
-              onClick={() => setSubTab('ai_monitor')}
-              className="rounded-lg bg-emerald-800 px-3 py-1.5 text-[11px] font-semibold text-white hover:bg-emerald-900"
-            >
-              Open AI Stock Monitor
-            </button>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setSubTab('auto_restock')}
+                className="inline-flex items-center gap-1 rounded-lg border border-emerald-300 bg-white px-3 py-1.5 text-[11px] font-semibold text-emerald-800 hover:bg-emerald-50"
+              >
+                <Truck className="h-3.5 w-3.5" />
+                Auto-Restock drafts
+                {lowCount > 0 && (
+                  <span className="rounded-full bg-red-100 px-1.5 py-0.5 text-[10px] font-bold text-red-900 tabular-nums">
+                    {lowCount}
+                  </span>
+                )}
+              </button>
+              <button
+                type="button"
+                onClick={() => setSubTab('ai_monitor')}
+                className="rounded-lg bg-emerald-800 px-3 py-1.5 text-[11px] font-semibold text-white hover:bg-emerald-900"
+              >
+                Open AI Stock Monitor
+              </button>
+            </div>
           </div>
 
           <div className="flex flex-wrap items-center justify-between gap-2">
@@ -1407,6 +1437,10 @@ export function InventoryView() {
             setSubTab('stock');
           }}
         />
+      )}
+
+      {subTab === 'auto_restock' && (
+        <AutoRestockPanel onOpenMonitor={() => setSubTab('ai_monitor')} />
       )}
     </div>
   );
