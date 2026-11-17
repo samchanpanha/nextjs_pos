@@ -14,6 +14,7 @@ import {
   Gift,
   UserPlus,
   Search,
+  ScanLine,
 } from 'lucide-react';
 import { usePos } from '../context/PosContext';
 import type { PosOrder } from '../types/pos';
@@ -32,6 +33,8 @@ import {
   normalizeCustomerPhone,
   searchMembers,
 } from '../utils/loyaltyEngine';
+import { findMemberByLoyaltyQr } from '../utils/loyaltyQr';
+import { LoyaltyQrScanner } from './LoyaltyQrScanner';
 import {
   generateBakongKhqrPayload,
   isMerchantKhqrConfigured,
@@ -58,6 +61,7 @@ export function PayModal({ order, onClose }: PayModalProps) {
     settleOrderPayment,
     setDisplayOrder,
     setNavSection,
+    notify,
   } = usePos();
 
   const [payMethod, setPayMethod] = useState<'Cash' | 'KHQR' | 'Bank transfer' | 'Card'>('Cash');
@@ -73,6 +77,7 @@ export function PayModal({ order, onClose }: PayModalProps) {
   const [showMemberPicker, setShowMemberPicker] = useState(false);
   const [showQuickEnroll, setShowQuickEnroll] = useState(false);
   const [quickEnrollName, setQuickEnrollName] = useState('');
+  const [showLoyaltyScanner, setShowLoyaltyScanner] = useState(false);
   const [redeemPoints, setRedeemPoints] = useState(order.pointsRedeemed || 0);
   const [promoCodeInput, setPromoCodeInput] = useState(order.promoCode || '');
   const [pinError, setPinError] = useState('');
@@ -149,7 +154,7 @@ export function PayModal({ order, onClose }: PayModalProps) {
         totalUsd: totals.totalUsd,
         pointsPerDollar: activeBranch.pointsPerDollar,
         pointsEnabled: activeBranch.pointsEnabled,
-        offlineMode: state.offlineMode,
+        tier: matchedMember.tier,
       })
     : 0;
   const activeBranchRewards = (state.loyaltyRewards || []).filter(
@@ -162,6 +167,34 @@ export function PayModal({ order, onClose }: PayModalProps) {
       p.usesLeft > 0 &&
       normalizeCustomerPhone(p.phone) === normalizeCustomerPhone(matchedMember?.phone || memberPhone)
   );
+
+  const handleLoyaltyQrDetected = (payload: string) => {
+    const member = findMemberByLoyaltyQr(state.members, payload);
+    if (!member) {
+      notify('No enrolled loyalty member matches that QR code.', 'warning');
+      setShowLoyaltyScanner(false);
+      return;
+    }
+    setMemberPhone(member.phone);
+    setShowMemberPicker(false);
+    setShowQuickEnroll(false);
+    setShowLoyaltyScanner(false);
+    attachMemberToOrder(order.id, member.phone, redeemPoints);
+    const earn = calculatePointsEarned({
+      totalUsd: totals.totalUsd,
+      pointsPerDollar: activeBranch.pointsPerDollar,
+      pointsEnabled: activeBranch.pointsEnabled,
+      tier: member.tier,
+    });
+    notify(
+      !activeBranch.pointsEnabled
+        ? `${member.name} attached to this bill (points program paused).`
+        : state.offlineMode
+          ? `${member.name} attached — ${earn} pts credited (offline, will sync).`
+          : `${member.name} attached — ${earn} pts will be added on payment.`,
+      'success'
+    );
+  };
 
   const setDisplayOrderRef = useRef(setDisplayOrder);
   setDisplayOrderRef.current = setDisplayOrder;
@@ -560,6 +593,15 @@ export function PayModal({ order, onClose }: PayModalProps) {
                       placeholder="Customer phone or name (e.g. Dara)"
                       className="flex-1 text-xs focus:outline-none"
                     />
+                    <button
+                      type="button"
+                      onClick={() => setShowLoyaltyScanner(true)}
+                      aria-label="Scan customer loyalty QR code"
+                      title="Scan loyalty QR"
+                      className="rounded p-1 text-amber-600 hover:bg-amber-50"
+                    >
+                      <ScanLine className="h-4 w-4" />
+                    </button>
                     {(memberPhone || matchedMember) && (
                       <button
                         type="button"
@@ -675,11 +717,11 @@ export function PayModal({ order, onClose }: PayModalProps) {
                         </div>
                       </div>
                       <span className="rounded-md bg-emerald-100 px-2 py-0.5 text-[10px] font-bold text-emerald-900 tabular-nums shrink-0">
-                        {state.offlineMode
-                          ? 'Offline (0 pts)'
-                          : activeBranch.pointsEnabled
-                            ? `+${estimatedEarnPoints} pts earn`
-                            : 'Points paused'}
+                        {!activeBranch.pointsEnabled
+                          ? 'Points paused'
+                          : state.offlineMode
+                            ? `+${estimatedEarnPoints} pts (offline)`
+                            : `+${estimatedEarnPoints} pts earn`}
                       </span>
                     </div>
 
@@ -1273,6 +1315,13 @@ export function PayModal({ order, onClose }: PayModalProps) {
           </div>
         </div>
       </div>
+
+      {showLoyaltyScanner && (
+        <LoyaltyQrScanner
+          onDetected={handleLoyaltyQrDetected}
+          onClose={() => setShowLoyaltyScanner(false)}
+        />
+      )}
     </div>
   );
 }

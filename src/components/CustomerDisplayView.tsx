@@ -1,8 +1,9 @@
 import { useState } from 'react';
-import { ArrowLeft, Monitor, CheckCircle2 } from 'lucide-react';
+import { ArrowLeft, Monitor, CheckCircle2, Award, Star } from 'lucide-react';
 import { usePos } from '../context/PosContext';
 import { usdToKhr } from '../utils/posMath';
 import { generateBakongKhqrPayload, isMerchantKhqrConfigured } from '../utils/bakongKhqr';
+import { calculatePointsEarned, findMemberByPhone, getNextTierProgress } from '../utils/loyaltyEngine';
 import { QrCodeBox } from './QrCodeBox';
 
 export function CustomerDisplayView() {
@@ -25,6 +26,24 @@ export function CustomerDisplayView() {
   const featuredBestSellers = state.menuItems
     .filter((m) => m.branchId === activeBranch.id && m.active && m.isBestSeller)
     .slice(0, 4);
+
+  const displayMember = activeOrder?.memberId
+    ? state.members.find((m) => m.id === activeOrder.memberId)
+    : activeOrder?.memberPhone
+      ? findMemberByPhone(state.members, activeOrder.memberPhone)
+      : undefined;
+  const displayEarnPoints =
+    displayMember && activeOrder
+      ? calculatePointsEarned({
+          totalUsd: activeOrder.totalUsd,
+          pointsPerDollar: activeBranch.pointsPerDollar,
+          pointsEnabled: activeBranch.pointsEnabled,
+          tier: displayMember.tier,
+        })
+      : 0;
+  const displayTier = displayMember
+    ? getNextTierProgress(displayMember.totalSpentUsd)
+    : null;
 
   const handlePair = (e: React.FormEvent) => {
     e.preventDefault();
@@ -247,8 +266,9 @@ export function CustomerDisplayView() {
           )}
         </section>
 
-        {/* Right: Preparing vs Ready to Collect Number Board */}
-        <section className="lg:col-span-5 grid grid-cols-2 gap-4">
+        {/* Right: Preparing vs Ready to Collect Number Board + Loyalty wallet */}
+        <section className="lg:col-span-5 flex flex-col gap-4">
+          <div className="grid grid-cols-2 gap-4">
           <div className="rounded-2xl border border-slate-200 bg-white p-5">
             <h3 className="text-sm font-bold text-slate-700 border-b border-slate-100 pb-2 mb-3">
               Preparing
@@ -290,6 +310,63 @@ export function CustomerDisplayView() {
               )}
             </div>
           </div>
+          </div>
+
+          {displayMember && displayTier && (
+            <div className="rounded-2xl border border-amber-200 bg-amber-50/70 p-5">
+              <h3 className="text-sm font-bold text-amber-950 flex items-center gap-1.5 border-b border-amber-200 pb-2 mb-3">
+                <Award className="h-4 w-4 text-amber-600" />
+                Loyalty rewards
+              </h3>
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <div className="text-base font-bold text-slate-900">{displayMember.name}</div>
+                  <div className="text-xs text-slate-500 font-mono">{displayMember.phone}</div>
+                </div>
+                <span className="inline-flex items-center gap-1 rounded-full bg-amber-200/80 px-2.5 py-1 text-[11px] font-bold text-amber-950">
+                  <Star className="h-3 w-3 fill-amber-500 text-amber-500" />
+                  {displayMember.tier}
+                </span>
+              </div>
+
+              <div className="mt-3 grid grid-cols-2 gap-3">
+                <div className="rounded-xl bg-white/80 border border-amber-200 p-3">
+                  <div className="text-[11px] text-slate-500">Points balance</div>
+                  <div className="text-2xl font-extrabold text-emerald-900 tabular-nums">
+                    {displayMember.points.toLocaleString()}
+                  </div>
+                </div>
+                <div className="rounded-xl bg-white/80 border border-amber-200 p-3">
+                  <div className="text-[11px] text-slate-500">You earn on this bill</div>
+                  <div className="text-2xl font-extrabold text-emerald-900 tabular-nums">
+                    +{displayEarnPoints.toLocaleString()}
+                  </div>
+                </div>
+              </div>
+
+              <div className="mt-3">
+                <div className="flex items-center justify-between text-[11px] text-slate-600">
+                  <span>
+                    {displayTier.nextTier
+                      ? `$${displayTier.remainingUsd.toFixed(2)} to ${displayTier.nextTier}`
+                      : 'Top Gold tier reached'}
+                  </span>
+                  <span className="font-semibold">{displayTier.progressPercent}%</span>
+                </div>
+                <div className="mt-1 h-2 w-full rounded-full bg-amber-200 overflow-hidden">
+                  <div
+                    className="h-full bg-amber-600 rounded-full"
+                    style={{ width: `${displayTier.progressPercent}%` }}
+                  />
+                </div>
+              </div>
+
+              <p className="mt-3 text-[11px] text-slate-600">
+                Show your loyalty QR at the counter — points are added automatically (
+                {activeBranch.pointsPerDollar} pt per $1).
+              </p>
+            </div>
+          )}
         </section>
       </div>
     </div>

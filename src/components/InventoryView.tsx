@@ -12,10 +12,12 @@ import {
   Search,
   RotateCcw,
   Sparkles,
+  Truck,
 } from 'lucide-react';
 import { usePos } from '../context/PosContext';
 import { roundCurrency, usdToKhr } from '../utils/posMath';
 import { AiStockMonitorPanel } from './AiStockMonitorPanel';
+import { AutoRestockPanel } from './AutoRestockPanel';
 import {
   areRecipeLinesEqual,
   calculateMenuProfitMargin,
@@ -25,7 +27,7 @@ import {
 } from '../utils/recipeMargin';
 import type { RecipeLine } from '../types/pos';
 
-type StockSubTab = 'stock' | 'ai_monitor' | 'recipes' | 'history' | 'margin';
+type StockSubTab = 'stock' | 'ai_monitor' | 'auto_restock' | 'recipes' | 'history' | 'margin';
 type MarginFilter = 'all' | 'linked' | 'unlinked' | 'low';
 type MarginSort = 'margin_asc' | 'margin_desc' | 'cost_desc' | 'name_asc';
 
@@ -72,6 +74,7 @@ export function InventoryView() {
     saveRecipe,
     saveMenuItem,
     aiStockAlerts,
+    setIngredientPreferredSupplier,
   } = usePos();
 
   const [subTab, setSubTab] = useState<StockSubTab>('stock');
@@ -107,6 +110,14 @@ export function InventoryView() {
         return a.nameEn.localeCompare(b.nameEn);
       });
   }, [state.ingredients, activeBranch.id]);
+
+  const branchSuppliers = useMemo(
+    () =>
+      (state.suppliers || []).filter(
+        (s) => s.active && (s.branchId === activeBranch.id || s.branchId === 'all')
+      ),
+    [state.suppliers, activeBranch.id]
+  );
 
   const totalStockValue = useMemo(
     () =>
@@ -356,6 +367,7 @@ export function InventoryView() {
             [
               { id: 'stock', label: 'Stock' },
               { id: 'ai_monitor', label: 'AI Stock Monitor' },
+              { id: 'auto_restock', label: 'Auto-Restock' },
               { id: 'recipes', label: 'Recipes & margin' },
               { id: 'history', label: 'History' },
               { id: 'margin', label: 'Cost & margin' },
@@ -374,6 +386,7 @@ export function InventoryView() {
               }`}
             >
               {tab.id === 'ai_monitor' && <Sparkles className="h-3.5 w-3.5" />}
+              {tab.id === 'auto_restock' && <Truck className="h-3.5 w-3.5" />}
               <span>{tab.label}</span>
               {tab.id === 'ai_monitor' && branchAiAlerts.length > 0 && (
                 <span
@@ -384,6 +397,17 @@ export function InventoryView() {
                   }`}
                 >
                   {branchAiAlerts.length}
+                </span>
+              )}
+              {tab.id === 'auto_restock' && lowCount > 0 && (
+                <span
+                  className={`rounded-full px-1.5 py-0.5 text-[10px] font-bold tabular-nums ${
+                    subTab === 'auto_restock'
+                      ? 'bg-white/20 text-white'
+                      : 'bg-red-100 text-red-900'
+                  }`}
+                >
+                  {lowCount}
                 </span>
               )}
             </button>
@@ -447,13 +471,28 @@ export function InventoryView() {
                 )}
               </span>
             </div>
-            <button
-              type="button"
-              onClick={() => setSubTab('ai_monitor')}
-              className="rounded-lg bg-emerald-800 px-3 py-1.5 text-[11px] font-semibold text-white hover:bg-emerald-900"
-            >
-              Open AI Stock Monitor
-            </button>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setSubTab('auto_restock')}
+                className="inline-flex items-center gap-1 rounded-lg border border-emerald-300 bg-white px-3 py-1.5 text-[11px] font-semibold text-emerald-800 hover:bg-emerald-50"
+              >
+                <Truck className="h-3.5 w-3.5" />
+                Auto-Restock drafts
+                {lowCount > 0 && (
+                  <span className="rounded-full bg-red-100 px-1.5 py-0.5 text-[10px] font-bold text-red-900 tabular-nums">
+                    {lowCount}
+                  </span>
+                )}
+              </button>
+              <button
+                type="button"
+                onClick={() => setSubTab('ai_monitor')}
+                className="rounded-lg bg-emerald-800 px-3 py-1.5 text-[11px] font-semibold text-white hover:bg-emerald-900"
+              >
+                Open AI Stock Monitor
+              </button>
+            </div>
           </div>
 
           <div className="flex flex-wrap items-center justify-between gap-2">
@@ -625,6 +664,7 @@ export function InventoryView() {
                   <th className="py-2 pr-3 font-semibold text-right">Min Level</th>
                   <th className="py-2 pr-3 font-semibold text-right">Avg Cost</th>
                   <th className="py-2 pr-3 font-semibold text-right">Stock Value</th>
+                  <th className="py-2 pr-3 font-semibold">Preferred Supplier</th>
                   <th className="py-2 font-semibold text-right">Actions</th>
                 </tr>
               </thead>
@@ -650,6 +690,21 @@ export function InventoryView() {
                       </td>
                       <td className="py-2.5 pr-3 text-right font-semibold tabular-nums">
                         ${(ing.onHand * ing.avgCostUsd).toFixed(2)}
+                      </td>
+                      <td className="py-2.5 pr-3">
+                        <select
+                          aria-label={`Preferred supplier for ${ing.nameEn}`}
+                          value={ing.preferredSupplierId || ''}
+                          onChange={(e) => setIngredientPreferredSupplier(ing.id, e.target.value)}
+                          className="max-w-[11rem] rounded border border-slate-300 bg-white px-1.5 py-1 text-[11px] text-slate-700"
+                        >
+                          <option value="">Auto-match</option>
+                          {branchSuppliers.map((s) => (
+                            <option key={s.id} value={s.id}>
+                              {s.name}
+                            </option>
+                          ))}
+                        </select>
                       </td>
                       <td className="py-2.5 text-right space-x-1.5 whitespace-nowrap">
                         <button
@@ -1407,6 +1462,10 @@ export function InventoryView() {
             setSubTab('stock');
           }}
         />
+      )}
+
+      {subTab === 'auto_restock' && (
+        <AutoRestockPanel onOpenMonitor={() => setSubTab('ai_monitor')} />
       )}
     </div>
   );

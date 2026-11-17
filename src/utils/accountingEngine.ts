@@ -883,6 +883,51 @@ export interface AutoDraftPoProposal {
   subtotalUsd: number;
 }
 
+/**
+ * Match an ingredient to the most plausible supplier using category keyword
+ * heuristics, falling back to the first active supplier. Returns null when no
+ * eligible supplier exists.
+ */
+export function matchIngredientSupplier(
+  ingredient: Ingredient,
+  suppliers: Supplier[]
+): Supplier | null {
+  if (suppliers.length === 0) return null;
+
+  // An explicitly preferred supplier always wins (when still eligible).
+  if (ingredient.preferredSupplierId) {
+    const preferred = suppliers.find((s) => s.id === ingredient.preferredSupplierId);
+    if (preferred) return preferred;
+  }
+
+  const lower = ingredient.nameEn.toLowerCase();
+  if (lower.includes('coffee') || lower.includes('bean') || lower.includes('tea')) {
+    return (
+      suppliers.find((s) => s.category.toLowerCase().includes('coffee')) || suppliers[0]
+    );
+  }
+  if (lower.includes('milk') || lower.includes('cream') || lower.includes('syrup')) {
+    return suppliers.find((s) => s.category.toLowerCase().includes('dairy')) || suppliers[0];
+  }
+  if (
+    lower.includes('beef') ||
+    lower.includes('prawn') ||
+    lower.includes('egg') ||
+    lower.includes('rice') ||
+    lower.includes('lime') ||
+    lower.includes('herb')
+  ) {
+    return (
+      suppliers.find(
+        (s) =>
+          s.category.toLowerCase().includes('fresh') ||
+          s.category.toLowerCase().includes('produce')
+      ) || suppliers[0]
+    );
+  }
+  return suppliers[0];
+}
+
 export function computeLowStockAutoDraftPos(params: {
   branchId: string;
   ingredients: Ingredient[];
@@ -913,44 +958,10 @@ export function computeLowStockAutoDraftPos(params: {
   );
   if (lowIngs.length === 0) return [];
 
-  // Match ingredient to best supplier by category keyword heuristic, fallback to first supplier
-  const chooseSupplier = (ing: Ingredient): Supplier => {
-    const lower = ing.nameEn.toLowerCase();
-    if (lower.includes('coffee') || lower.includes('bean') || lower.includes('tea')) {
-      return (
-        activeSuppliers.find((s) => s.category.toLowerCase().includes('coffee')) ||
-        activeSuppliers[0]
-      );
-    }
-    if (lower.includes('milk') || lower.includes('cream') || lower.includes('syrup')) {
-      return (
-        activeSuppliers.find((s) => s.category.toLowerCase().includes('dairy')) ||
-        activeSuppliers[0]
-      );
-    }
-    if (
-      lower.includes('beef') ||
-      lower.includes('prawn') ||
-      lower.includes('egg') ||
-      lower.includes('rice') ||
-      lower.includes('lime') ||
-      lower.includes('herb')
-    ) {
-      return (
-        activeSuppliers.find(
-          (s) =>
-            s.category.toLowerCase().includes('fresh') ||
-            s.category.toLowerCase().includes('produce')
-        ) || activeSuppliers[0]
-      );
-    }
-    return activeSuppliers[0];
-  };
-
   const grouped = new Map<string, { supplier: Supplier; lines: PurchaseOrderLine[] }>();
 
   for (const ing of lowIngs) {
-    const sup = chooseSupplier(ing);
+    const sup = matchIngredientSupplier(ing, activeSuppliers) || activeSuppliers[0];
     const targetStock = Math.max(ing.minLevel * 2.5, ing.minLevel + ing.purchaseUnitSize);
     const deficitBaseUnits = Math.max(ing.purchaseUnitSize, targetStock - ing.onHand);
     const conversion = Math.max(1, ing.purchaseUnitSize || 1);

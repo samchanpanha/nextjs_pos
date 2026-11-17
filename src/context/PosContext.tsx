@@ -144,6 +144,10 @@ import {
   removeLoyaltyRewardLine,
   settleMemberLoyalty,
 } from '../utils/loyaltyEngine';
+import {
+  buildLoyaltyExpiryAdjustments,
+  POINTS_EXPIRY_DAYS,
+} from '../utils/loyaltyExpiry';
 
 const STORAGE_KEY = 'xaiwork_pos_state_v1';
 const TENANTS_STORAGE_KEY = 'xaiwork_pos_tenants_v1';
@@ -218,6 +222,7 @@ interface PosContextValue {
   voidOrder: (orderId: string, reason: string, managerPin: string) => boolean;
   addLoyaltyMember: (params: { name: string; phone: string; initialPoints?: number }) => LoyaltyMember | null;
   adjustMemberPoints: (memberId: string, delta: number, reason: string) => boolean;
+  expireLoyaltyPoints: (opts?: { referenceDate?: string; expiryDays?: number }) => number;
   saveLoyaltyReward: (reward: Omit<LoyaltyReward, 'id' | 'branchId'> & { id?: string }) => void;
   toggleLoyaltyReward: (rewardId: string) => void;
   updateLoyaltyRules: (
@@ -294,6 +299,7 @@ interface PosContextValue {
   addPettyCash: (entry: Omit<PettyCashEntry, 'id' | 'createdAt' | 'actorName'>) => void;
   closeShift: (countedUsd: number, countedKhr: number, managerPin?: string) => boolean;
   addIngredient: (ing: Omit<Ingredient, 'id' | 'branchId' | 'used7d'>) => void;
+  setIngredientPreferredSupplier: (ingredientId: string, supplierId: string) => void;
   recordIngredientPurchase: (ingredientId: string, qtyAdded: number, totalCostUsd: number) => void;
   recordIngredientWaste: (ingredientId: string, qtyWasted: number, note: string) => void;
   recordStockCount: (ingredientId: string, actualQty: number) => void;
@@ -364,6 +370,14 @@ interface PosContextValue {
     lines: Omit<PurchaseOrderLine, 'id' | 'receivedQty' | 'lineTotalUsd'>[];
   }) => PurchaseOrder | null;
   autoDraftLowStockPurchaseOrders: () => number;
+  logAutoRestockDraftSent: (params: {
+    poNumber: string;
+    supplierId: string;
+    supplierName: string;
+    channel: 'email' | 'pdf';
+    recipient?: string;
+    totalUsd: number;
+  }) => void;
   updatePurchaseOrderStatus: (poId: string, status: 'sent' | 'cancelled') => void;
   receivePurchaseOrder: (params: {
     poId: string;
@@ -3010,6 +3024,19 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     setState((prev) => ({ ...prev, ingredients: [newIng, ...prev.ingredients] }));
   };
 
+  const setIngredientPreferredSupplier: PosContextValue['setIngredientPreferredSupplier'] = (
+    ingredientId,
+    supplierId
+  ) => {
+    const clean = supplierId.trim();
+    setState((prev) => ({
+      ...prev,
+      ingredients: prev.ingredients.map((ing) =>
+        ing.id === ingredientId ? { ...ing, preferredSupplierId: clean || undefined } : ing
+      ),
+    }));
+  };
+
   const recordIngredientPurchase = (ingredientId: string, qtyAdded: number, totalCostUsd: number) => {
     setState((prev) => {
       const ing = prev.ingredients.find((i) => i.id === ingredientId);
@@ -3338,6 +3365,53 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
       'success'
     );
     return true;
+  };
+
+  const expireLoyaltyPoints: PosContextValue['expireLoyaltyPoints'] = (opts) => {
+    if (!hasCurrentPermission('promotion') && !canEditSettings(activeStaff, state.ownerPermissions)) {
+      notify('Permission required to run the points expiry sweep.', 'warning');
+      return 0;
+    }
+    const referenceDate = opts?.referenceDate || new Date().toISOString().slice(0, 10);
+    const expiryDays = opts?.expiryDays ?? POINTS_EXPIRY_DAYS;
+    const adjustments = buildLoyaltyExpiryAdjustments(state.members, {
+      referenceDate,
+      expiryDays,
+    });
+    const totalExpired = adjustments.reduce((sum, adj) => sum + adj.points, 0);
+    if (adjustments.length === 0 || totalExpired <= 0) {
+      notify('No loyalty points have expired yet.', 'info');
+      return 0;
+    }
+
+    const nowIso = new Date().toISOString();
+    setState((prev) => ({
+      ...prev,
+      members: prev.members.map((m) => {
+        const adj = adjustments.find((a) => a.memberId === m.id);
+        if (!adj || adj.points <= 0) return m;
+        const nextBalance = Math.max(0, m.points - adj.points);
+        const tx: LoyaltyTransaction = {
+          id: `ltx_exp_${m.id}_${Date.now()}`,
+          memberId: m.id,
+          type: 'adjust',
+          pointsDelta: -adj.points,
+          balanceAfter: nextBalance,
+          description: adj.description,
+          createdAt: nowIso,
+        };
+        return {
+          ...m,
+          points: nextBalance,
+          loyaltyHistory: [tx, ...(m.loyaltyHistory || [])].slice(0, 100),
+        };
+      }),
+    }));
+    notify(
+      `Expired ${totalExpired.toLocaleString()} pts across ${adjustments.length} member(s).`,
+      'success'
+    );
+    return adjustments.length;
   };
 
   const saveLoyaltyReward: PosContextValue['saveLoyaltyReward'] = (reward) => {
@@ -4249,6 +4323,23 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     return proposals.length;
   };
 
+  const logAutoRestockDraftSent: PosContextValue['logAutoRestockDraftSent'] = (params) => {
+    if (isSuperAdmin(activeStaff)) return;
+    const detail = [
+      params.poNumber,
+      params.channel.toUpperCase(),
+      params.supplierName,
+      `$${params.totalUsd.toFixed(2)}`,
+      params.recipient ? `→ ${params.recipient}` : '',
+    ]
+      .filter(Boolean)
+      .join(' · ');
+    setState((prev) => ({
+      ...prev,
+      auditLogs: [appendAudit(prev, 'Auto-Restock draft sent', detail), ...prev.auditLogs],
+    }));
+  };
+
   const updatePurchaseOrderStatus: PosContextValue['updatePurchaseOrderStatus'] = (
     poId,
     status
@@ -4792,6 +4883,7 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     voidOrder,
     addLoyaltyMember,
     adjustMemberPoints,
+    expireLoyaltyPoints,
     saveLoyaltyReward,
     toggleLoyaltyReward,
     updateLoyaltyRules,
@@ -4841,6 +4933,7 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     addPettyCash,
     closeShift,
     addIngredient,
+    setIngredientPreferredSupplier,
     recordIngredientPurchase,
     recordIngredientWaste,
     recordStockCount,
@@ -4878,6 +4971,7 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     deleteSupplier,
     createPurchaseOrder,
     autoDraftLowStockPurchaseOrders,
+    logAutoRestockDraftSent,
     updatePurchaseOrderStatus,
     receivePurchaseOrder,
     payPurchaseOrder,

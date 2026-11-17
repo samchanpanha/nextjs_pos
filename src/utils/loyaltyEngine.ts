@@ -33,7 +33,33 @@ export function searchMembers(members: MemberCustomer[], query: string): MemberC
   );
 }
 
-export function computeMemberTier(totalSpentUsd: number): 'Member' | 'Silver' | 'Gold' {
+export type MemberTier = 'Member' | 'Silver' | 'Gold';
+
+/** Points multiplier earned per tier — makes Silver/Gold tangible. */
+export const TIER_EARN_MULTIPLIERS: Record<MemberTier, number> = {
+  Member: 1,
+  Silver: 1.25,
+  Gold: 1.5,
+};
+
+/** One-time bonus credited when a member moves up a tier. */
+export const TIER_UP_BONUS_POINTS: Record<MemberTier, number> = {
+  Member: 0,
+  Silver: 100,
+  Gold: 250,
+};
+
+const TIER_RANK: Record<MemberTier, number> = {
+  Member: 0,
+  Silver: 1,
+  Gold: 2,
+};
+
+export function getTierEarnMultiplier(tier: MemberTier): number {
+  return TIER_EARN_MULTIPLIERS[tier] ?? 1;
+}
+
+export function computeMemberTier(totalSpentUsd: number): MemberTier {
   if (totalSpentUsd >= 500) return 'Gold';
   if (totalSpentUsd >= 100) return 'Silver';
   return 'Member';
@@ -64,11 +90,18 @@ export function calculatePointsEarned(params: {
   totalUsd: number;
   pointsPerDollar: number;
   pointsEnabled: boolean;
-  offlineMode?: boolean;
+  /** Member tier at the time of the bill; defaults to the base rate. */
+  tier?: MemberTier;
+  /** Explicit override of the tier multiplier (e.g. promotions). */
+  tierMultiplier?: number;
 }): number {
-  if (!params.pointsEnabled || params.offlineMode) return 0;
+  if (!params.pointsEnabled) return 0;
   if (params.totalUsd <= 0 || params.pointsPerDollar <= 0) return 0;
-  return Math.max(0, Math.floor(params.totalUsd * params.pointsPerDollar));
+  const multiplier = Math.max(
+    0,
+    params.tierMultiplier ?? (params.tier ? getTierEarnMultiplier(params.tier) : 1)
+  );
+  return Math.max(0, Math.floor(params.totalUsd * params.pointsPerDollar * multiplier));
 }
 
 export function calculatePointsDiscountUsd(
@@ -301,6 +334,8 @@ export function settleMemberLoyalty(params: {
 }): {
   updatedMember: MemberCustomer;
   earnedPoints: number;
+  bonusPoints: number;
+  tierUpgradedTo: MemberTier | null;
   discountPointsUsed: number;
   itemPointsUsed: number;
   balanceAfter: number;
@@ -310,7 +345,9 @@ export function settleMemberLoyalty(params: {
   const rawDiscountPts = Math.max(0, Math.round(order.pointsRedeemed || 0));
   const rawItemPts = getOrderLoyaltyItemPointsUsed(order.items);
 
-  // Respect available point balance safely: item rewards + discount points
+  // Respect available point balance safely: item rewards + discount points.
+  // Redemptions stay online-only (the cloud balance is the source of truth);
+  // earning is credited immediately, including offline, and syncs with the state.
   const itemPointsUsed = offlineMode ? 0 : Math.min(member.points, rawItemPts);
   const remainingAfterItems = Math.max(0, member.points - itemPointsUsed);
   const discountPointsUsed = offlineMode ? 0 : Math.min(remainingAfterItems, rawDiscountPts);
@@ -319,13 +356,16 @@ export function settleMemberLoyalty(params: {
     totalUsd: totalPaidUsd,
     pointsPerDollar: branch.pointsPerDollar,
     pointsEnabled: branch.pointsEnabled,
-    offlineMode,
+    tier: member.tier,
   });
 
   const balanceAfterRedeem = Math.max(0, member.points - itemPointsUsed - discountPointsUsed);
-  const balanceAfter = balanceAfterRedeem + earnedPoints;
   const nextSpent = roundCurrency(member.totalSpentUsd + Math.max(0, totalPaidUsd));
   const nextTier = computeMemberTier(nextSpent);
+  const tierUpgradedTo =
+    TIER_RANK[nextTier] > TIER_RANK[member.tier] ? nextTier : null;
+  const bonusPoints = tierUpgradedTo ? TIER_UP_BONUS_POINTS[tierUpgradedTo] : 0;
+  const balanceAfter = balanceAfterRedeem + earnedPoints + bonusPoints;
 
   const newEntries: LoyaltyTransaction[] = [];
   let running = member.points;
@@ -377,7 +417,23 @@ export function settleMemberLoyalty(params: {
       pointsDelta: earnedPoints,
       balanceAfter: running,
       amountUsd: totalPaidUsd,
-      description: `Earned from Bill #${order.orderNumber} ($${totalPaidUsd.toFixed(2)})`,
+      description: `Earned${offlineMode ? ' (offline)' : ''} from Bill #${order.orderNumber} ($${totalPaidUsd.toFixed(2)})`,
+      createdAt: nowIso,
+    });
+  }
+
+  if (bonusPoints > 0 && tierUpgradedTo) {
+    running += bonusPoints;
+    newEntries.push({
+      id: `ltx_tier_${order.id}_${Date.now()}`,
+      memberId: member.id,
+      orderId: order.id,
+      orderNumber: order.orderNumber,
+      type: 'bonus',
+      pointsDelta: bonusPoints,
+      balanceAfter: running,
+      amountUsd: totalPaidUsd,
+      description: `Tier upgrade bonus — welcomed to ${tierUpgradedTo}!`,
       createdAt: nowIso,
     });
   }
@@ -394,6 +450,8 @@ export function settleMemberLoyalty(params: {
       loyaltyHistory: [...newEntries.reverse(), ...existingHistory].slice(0, 100),
     },
     earnedPoints,
+    bonusPoints,
+    tierUpgradedTo,
     discountPointsUsed,
     itemPointsUsed,
     balanceAfter,

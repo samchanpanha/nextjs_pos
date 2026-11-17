@@ -2,9 +2,18 @@ import React, { useMemo, useState } from 'react';
 import { BarChart3, Sparkles, Calendar, Send, Clock, Receipt } from 'lucide-react';
 import { usePos } from '../context/PosContext';
 import { roundCurrency, usdToKhr } from '../utils/posMath';
+import { summarizeLoyaltyProgram } from '../utils/loyaltyQr';
+import { summarizeLoyaltyExpiry, EXPIRY_WARNING_WINDOW_DAYS } from '../utils/loyaltyExpiry';
 import { AiForecastWidget } from './AiForecastWidget';
 
-type ReportTab = 'overview' | 'details' | 'ai' | 'forecast' | 'shifts' | 'telegram';
+type ReportTab =
+  | 'overview'
+  | 'details'
+  | 'ai'
+  | 'forecast'
+  | 'shifts'
+  | 'telegram'
+  | 'loyalty';
 
 export function ReportsView() {
   const { state, activeBranch, language, setReceiptOrder } = usePos();
@@ -68,6 +77,53 @@ export function ReportsView() {
     });
     return Array.from(map.values()).sort((a, b) => b.revenueUsd - a.revenueUsd);
   }, [paidOrders]);
+
+  const branchIngredients = useMemo(
+    () => state.ingredients.filter((i) => i.branchId === activeBranch.id),
+    [state.ingredients, activeBranch.id]
+  );
+
+  const loyaltyReport = useMemo(
+    () =>
+      summarizeLoyaltyProgram({
+        members: state.members,
+        pointsValuePer100: activeBranch.pointsValuePer100,
+      }),
+    [state.members, activeBranch.pointsValuePer100]
+  );
+
+  const loyaltyExpiry = useMemo(
+    () =>
+      summarizeLoyaltyExpiry(state.members, {
+        referenceDate: new Date().toISOString().slice(0, 10),
+        windowDays: EXPIRY_WARNING_WINDOW_DAYS,
+      }),
+    [state.members]
+  );
+
+  const topMembers = useMemo(
+    () => [...state.members].sort((a, b) => b.points - a.points).slice(0, 8),
+    [state.members]
+  );
+
+  const procurementSummary = useMemo(() => {
+    const pos = (state.purchaseOrders || []).filter((p) => p.branchId === activeBranch.id);
+    const openPos = pos.filter(
+      (p) => p.status === 'draft' || p.status === 'sent' || p.status === 'partial'
+    );
+    const openApUsd = roundCurrency(openPos.reduce((s, p) => s + (p.balanceDueUsd || 0), 0));
+    const lowStock = branchIngredients.filter((i) => i.onHand <= i.minLevel).length;
+    const cutoffMs = Date.now() - 7 * 86_400_000;
+    const waste7dUsd = roundCurrency(
+      state.stockHistory
+        .filter((h) => h.type === 'waste' && Date.parse(h.createdAt) >= cutoffMs)
+        .reduce((s, h) => {
+          const ing = branchIngredients.find((i) => i.id === h.ingredientId);
+          return s + Math.abs(h.qtyDelta) * (ing?.avgCostUsd || 0);
+        }, 0)
+    );
+    return { openPoCount: openPos.length, openApUsd, lowStock, waste7dUsd };
+  }, [state.purchaseOrders, state.stockHistory, branchIngredients, activeBranch.id]);
 
   const maxDailyRev = Math.max(
     1,
@@ -156,6 +212,7 @@ export function ReportsView() {
               ['forecast', '14-day forecast'],
               ['shifts', 'Shift history'],
               ['telegram', 'Telegram report'],
+              ['loyalty', 'Loyalty & Restock'],
             ] as [ReportTab, string][]
           ).map(([id, label]) => (
             <button
@@ -518,6 +575,137 @@ export function ReportsView() {
             >
               <Send className="h-3.5 w-3.5" /> Send Telegram Report Now
             </button>
+          </div>
+        </div>
+      )}
+
+      {tab === 'loyalty' && (
+        <div className="space-y-5">
+          <div className="rounded-xl border border-slate-200 bg-white p-5 space-y-4">
+            <h2 className="text-sm font-bold text-slate-900">Loyalty ROI — {activeBranch.name}</h2>
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+              <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                <div className="text-[11px] text-slate-500">Enrolled members</div>
+                <div className="text-xl font-extrabold text-slate-900">{loyaltyReport.activeMembers}</div>
+                <div className="mt-0.5 text-[11px] text-slate-500">
+                  {loyaltyReport.goldMembers} Gold · {loyaltyReport.silverMembers} Silver
+                </div>
+              </div>
+              <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                <div className="text-[11px] text-slate-500">Points outstanding</div>
+                <div className="text-xl font-extrabold text-slate-900">
+                  {loyaltyReport.totalPointsOutstanding.toLocaleString()}
+                </div>
+                <div className="mt-0.5 text-[11px] text-slate-500">
+                  ≈ ${loyaltyReport.pointsOutstandingValueUsd.toFixed(2)} liability
+                </div>
+              </div>
+              <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                <div className="text-[11px] text-slate-500">Lifetime spend (members)</div>
+                <div className="text-xl font-extrabold text-slate-900">
+                  ${loyaltyReport.totalLifetimeSpendUsd.toFixed(2)}
+                </div>
+                <div className="mt-0.5 text-[11px] text-slate-500">
+                  {loyaltyReport.earningVisits} earning visits
+                </div>
+              </div>
+              <div className="rounded-lg border border-amber-200 bg-amber-50 p-3">
+                <div className="text-[11px] text-amber-800">Expiring within {EXPIRY_WARNING_WINDOW_DAYS}d</div>
+                <div className="text-xl font-extrabold text-amber-900">
+                  {loyaltyExpiry.expiringPoints.toLocaleString()} pts
+                </div>
+                <div className="mt-0.5 text-[11px] text-amber-700">
+                  {loyaltyExpiry.affectedMembers} member(s)
+                  {loyaltyExpiry.nextExpiryDate ? ` · next ${loyaltyExpiry.nextExpiryDate}` : ''}
+                </div>
+              </div>
+            </div>
+
+            <div className="rounded-lg border border-slate-200 overflow-hidden">
+              <table className="w-full text-xs">
+                <thead className="bg-slate-50 text-left text-slate-600">
+                  <tr>
+                    <th className="py-2 px-3 font-semibold">Member</th>
+                    <th className="py-2 px-3 font-semibold text-right">Tier</th>
+                    <th className="py-2 px-3 font-semibold text-right">Points</th>
+                    <th className="py-2 px-3 font-semibold text-right">Lifetime spend</th>
+                    <th className="py-2 px-3 font-semibold text-right">Expiring ≤{EXPIRY_WARNING_WINDOW_DAYS}d</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {topMembers.length === 0 ? (
+                    <tr>
+                      <td colSpan={5} className="py-3 px-3 text-slate-500">
+                        No enrolled members yet.
+                      </td>
+                    </tr>
+                  ) : (
+                    topMembers.map((m) => {
+                      const exp = loyaltyExpiry.rows.find((r) => r.memberId === m.id);
+                      return (
+                        <tr key={m.id} className="border-t border-slate-100">
+                          <td className="py-2 px-3 font-medium text-slate-800">
+                            {m.name}
+                            <div className="text-[11px] text-slate-500 font-mono">{m.phone}</div>
+                          </td>
+                          <td className="py-2 px-3 text-right">{m.tier}</td>
+                          <td className="py-2 px-3 text-right tabular-nums font-semibold">
+                            {m.points.toLocaleString()}
+                          </td>
+                          <td className="py-2 px-3 text-right tabular-nums">
+                            ${m.totalSpentUsd.toFixed(2)}
+                          </td>
+                          <td className="py-2 px-3 text-right tabular-nums">
+                            {exp?.expiringPoints ? `${exp.expiringPoints.toLocaleString()} pts` : '—'}
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div className="rounded-xl border border-slate-200 bg-white p-5 space-y-4">
+            <h2 className="text-sm font-bold text-slate-900">Restock economics</h2>
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+              <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                <div className="text-[11px] text-slate-500">Low-stock items</div>
+                <div className="text-xl font-extrabold text-amber-900">{procurementSummary.lowStock}</div>
+                <div className="mt-0.5 text-[11px] text-slate-500">at / below min level</div>
+              </div>
+              <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                <div className="text-[11px] text-slate-500">Open purchase orders</div>
+                <div className="text-xl font-extrabold text-slate-900">{procurementSummary.openPoCount}</div>
+                <div className="mt-0.5 text-[11px] text-slate-500">
+                  ${procurementSummary.openApUsd.toFixed(2)} payable
+                </div>
+              </div>
+              <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                <div className="text-[11px] text-slate-500">Stock waste (7d)</div>
+                <div className="text-xl font-extrabold text-red-800">
+                  ${procurementSummary.waste7dUsd.toFixed(2)}
+                </div>
+                <div className="mt-0.5 text-[11px] text-slate-500">cost value of discards</div>
+              </div>
+              <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3">
+                <div className="text-[11px] text-emerald-800">Waste vs payables</div>
+                <div className="text-xl font-extrabold text-emerald-900">
+                  {procurementSummary.openApUsd > 0
+                    ? `${Math.round((procurementSummary.waste7dUsd / procurementSummary.openApUsd) * 100)}%`
+                    : '—'}
+                </div>
+                <div className="mt-0.5 text-[11px] text-emerald-700">
+                  lower = leaner purchasing
+                </div>
+              </div>
+            </div>
+            <p className="text-xs text-slate-500">
+              Open drafts are excluded from Auto-Restock so the same PO is never sent twice —
+              use the Auto-Restock tab in Inventory to generate fresh drafts for items below
+              minimum level, and mark received POs in Purchase Orders to clear the payable.
+            </p>
           </div>
         </div>
       )}
