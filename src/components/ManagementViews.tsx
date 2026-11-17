@@ -3195,7 +3195,23 @@ export function SettingsView() {
       {/* Operations & Display */}
       <div className="rounded-xl border border-slate-200 bg-white p-4 space-y-3 text-xs">
         <h2 className="text-sm font-bold text-slate-900">QR ordering, KDS &amp; drawer controls</h2>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <div>
+            <label htmlFor="settings-daily-target" className="block font-semibold text-slate-700 mb-1">
+              Daily Sales Target (USD)
+            </label>
+            <input
+              id="settings-daily-target"
+              type="number"
+              min={1}
+              step="any"
+              value={effectiveBranch.dailySalesTargetUsd ?? 250}
+              onChange={(e) =>
+                updateField('dailySalesTargetUsd', Math.max(1, Number(e.target.value) || 250))
+              }
+              className="w-full rounded-lg border border-slate-300 px-3 py-1.5 tabular-nums"
+            />
+          </div>
           <div>
             <label className="block font-semibold text-slate-700 mb-1">Guest QR Mode</label>
             <select

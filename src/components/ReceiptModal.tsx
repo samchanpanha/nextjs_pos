@@ -37,7 +37,7 @@ export function ReceiptModal({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4 print:static print:inset-auto print:block print:bg-white print:p-0"
       role="dialog"
       aria-modal="true"
       aria-label="Receipt preview"
@@ -45,7 +45,7 @@ export function ReceiptModal({
       <div
         className={`w-full ${
           tpl.style === 'a4_tax_invoice' ? 'max-w-2xl' : 'max-w-md'
-        } rounded-xl border border-slate-200 bg-white shadow-xl overflow-hidden`}
+        } rounded-xl border border-slate-200 bg-white shadow-xl overflow-hidden print:max-w-none print:rounded-none print:border-0 print:shadow-none print:overflow-visible`}
       >
         <div className="no-print flex items-center justify-between border-b border-slate-200 bg-emerald-950 px-4 py-3 text-white">
           <div className="flex items-center gap-2 text-sm font-semibold">
@@ -64,7 +64,7 @@ export function ReceiptModal({
           </button>
         </div>
 
-        <div className="max-h-[75vh] overflow-y-auto bg-slate-100/70 p-4 sm:p-5">
+        <div className="max-h-[75vh] overflow-y-auto bg-slate-100/70 p-4 sm:p-5 print:max-h-none print:overflow-visible print:bg-white print:p-0">
           <ReceiptInvoiceDocument
             order={order}
             branch={branch}

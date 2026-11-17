@@ -1,14 +1,104 @@
-import { useEffect, useState } from 'react';
-import { ArrowLeft, Bell, Receipt, Plus, Minus, ShoppingBag, Users, CheckCircle2 } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import {
+  ArrowLeft,
+  Bell,
+  Receipt,
+  Plus,
+  Minus,
+  ShoppingBag,
+  Users,
+  CheckCircle2,
+  ChefHat,
+  Clock,
+  UtensilsCrossed,
+  XCircle,
+} from 'lucide-react';
 import { usePos } from '../context/PosContext';
 import { I18N } from '../data/i18n';
 import type { LanguageCode, MenuItem } from '../types/pos';
 import { usdToKhr } from '../utils/posMath';
 import { submitPublicServiceAlertToSqlite } from '../lib/sqliteClient';
+import { resolveGuestOrderLiveStatus, type GuestOrderStage } from '../utils/guestOrderStatus';
+
+const STAGE_COPY: Record<
+  LanguageCode,
+  {
+    liveOrderStatus: string;
+    syncedWithKds: string;
+    awaitingConfirm: string;
+    declinedTitle: string;
+    declinedSubtitle: string;
+    stages: { id: 'received' | 'preparing' | 'ready' | 'served'; label: string; hint: string }[];
+  }
+> = {
+  en: {
+    liveOrderStatus: 'Live Order Status',
+    syncedWithKds: 'Synced with KDS',
+    awaitingConfirm: 'Waiting for cashier confirmation',
+    declinedTitle: 'Order could not be confirmed',
+    declinedSubtitle: 'Please tap Call staff if you need help with your order.',
+    stages: [
+      { id: 'received', label: 'Received', hint: 'Sent to kitchen' },
+      { id: 'preparing', label: 'Preparing', hint: 'Cooking now' },
+      { id: 'ready', label: 'Ready', hint: 'Ready to serve' },
+      { id: 'served', label: 'Served', hint: 'Enjoy your meal' },
+    ],
+  },
+  kh: {
+    liveOrderStatus: 'ស្ថានភាពការកម្ម៉ង់ផ្ទាល់',
+    syncedWithKds: 'ភ្ជាប់ផ្ទាល់ជាមួយផ្ទះបាយ',
+    awaitingConfirm: 'កំពុងរង់ចាំបុគ្គលិកបញ្ជាក់',
+    declinedTitle: 'ការកម្ម៉ង់មិនត្រូវបានបញ្ជាក់ទេ',
+    declinedSubtitle: 'សូមចុច ហៅបុគ្គលិក ប្រសិនបើត្រូវការជំនួយ។',
+    stages: [
+      { id: 'received', label: 'បានទទួល', hint: 'ផ្ញើទៅផ្ទះបាយ' },
+      { id: 'preparing', label: 'កំពុងចម្អិន', hint: 'កំពុងរៀបចំ' },
+      { id: 'ready', label: 'រួចរាល់', hint: 'រួចរាល់សម្រាប់បម្រើ' },
+      { id: 'served', label: 'បានបម្រើ', hint: 'សូមពិសាដោយឆ្ងាញ់' },
+    ],
+  },
+  vi: {
+    liveOrderStatus: 'Trạng thái món trực tiếp',
+    syncedWithKds: 'Đồng bộ với bếp KDS',
+    awaitingConfirm: 'Đang chờ thu ngân xác nhận',
+    declinedTitle: 'Đơn chưa được xác nhận',
+    declinedSubtitle: 'Vui lòng nhấn Gọi nhân viên để được hỗ trợ.',
+    stages: [
+      { id: 'received', label: 'Đã nhận', hint: 'Đã gửi bếp' },
+      { id: 'preparing', label: 'Đang làm', hint: 'Đang chế biến' },
+      { id: 'ready', label: 'Sẵn sàng', hint: 'Sẵn sàng phục vụ' },
+      { id: 'served', label: 'Đã lên món', hint: 'Chúc ngon miệng' },
+    ],
+  },
+};
+
+function stageIndex(stage: GuestOrderStage): number {
+  switch (stage) {
+    case 'received':
+      return 0;
+    case 'preparing':
+      return 1;
+    case 'ready':
+      return 2;
+    case 'served':
+      return 3;
+    default:
+      return -1;
+  }
+}
 
 export function GuestQrView() {
-  const { state, activeTenantId, activeBranch, language, setLanguage, submitGuestQrOrder, setExternalMode } = usePos();
+  const {
+    state,
+    activeTenantId,
+    activeBranch,
+    language,
+    setLanguage,
+    submitGuestQrOrder,
+    setExternalMode,
+  } = usePos();
   const t = I18N[language];
+  const copy = STAGE_COPY[language];
   const branchTables = state.tables.filter((tb) => tb.branchId === activeBranch.id);
   const [selectedTableId, setSelectedTableId] = useState<string>(() => {
     const params = new URLSearchParams(window.location.search);
@@ -36,6 +126,7 @@ export function GuestQrView() {
     );
     if (match) setSelectedTableId(match.id);
   }, [activeBranch.id]);
+
   const [category, setCategory] = useState('All');
   const [cart, setCart] = useState<{ item: MenuItem; qty: number }[]>([]);
   const [note, setNote] = useState('');
@@ -47,6 +138,26 @@ export function GuestQrView() {
   const menu = state.menuItems.filter((m) => m.branchId === activeBranch.id && m.active);
   const categories = ['All', ...Array.from(new Set(menu.map((m) => m.category)))];
   const selectedTable = branchTables.find((tb) => tb.id === selectedTableId);
+
+  const liveOrderStatus = useMemo(
+    () =>
+      resolveGuestOrderLiveStatus({
+        branchId: activeBranch.id,
+        selectedTableId: selectedTable?.id || '',
+        selectedTableName: selectedTable ? selectedTable.name : 'Counter QR',
+        orders: state.orders,
+        qrQueue: state.qrQueue,
+        submittedOrderNumber: submittedNumber,
+      }),
+    [
+      activeBranch.id,
+      selectedTable?.id,
+      selectedTable?.name,
+      state.orders,
+      state.qrQueue,
+      submittedNumber,
+    ]
+  );
 
   const addToCart = (item: MenuItem) => {
     setCart((prev) => {
@@ -92,8 +203,10 @@ export function GuestQrView() {
     setCartOpen(false);
   };
 
-  const getTitle = (m: MenuItem) =>
+  const getTitle = (m: { nameEn: string; nameKh?: string; nameVi?: string }) =>
     language === 'kh' && m.nameKh ? m.nameKh : language === 'vi' && m.nameVi ? m.nameVi : m.nameEn;
+
+  const activeStageIdx = liveOrderStatus ? stageIndex(liveOrderStatus.stage) : -1;
 
   return (
     <div className="min-h-screen bg-[#E9ECEA] py-4 px-3 flex justify-center">
@@ -133,14 +246,17 @@ export function GuestQrView() {
           </div>
         </header>
 
-        {/* Quick Table Switch + Call Staff / Ask for Bill */}
+        {/* Quick Table Switch + Call Staff / Ask for Bill + Live KDS Order Status */}
         <div className="p-4 border-b border-slate-100 space-y-3">
           <div className="flex items-center justify-between gap-2 text-xs">
             <span className="text-slate-600">សួស្តី · Welcome! Scan, choose, send.</span>
             <select
               aria-label="Select QR table"
               value={selectedTableId}
-              onChange={(e) => setSelectedTableId(e.target.value)}
+              onChange={(e) => {
+                setSelectedTableId(e.target.value);
+                setSubmittedNumber(null);
+              }}
               className="rounded border border-slate-200 px-2 py-1 text-xs font-semibold"
             >
               <option value="">Counter Takeaway</option>
@@ -199,18 +315,138 @@ export function GuestQrView() {
             </div>
           )}
 
-          {submittedNumber !== null && (
-            <div className="rounded-xl bg-emerald-900 text-white p-3.5 flex items-center gap-2.5 text-xs">
-              <CheckCircle2 className="h-5 w-5 text-emerald-300 shrink-0" />
-              <div>
-                <div className="font-bold">Order #{submittedNumber} sent!</div>
-                <div className="text-emerald-100">
-                  {activeBranch.qrMode === 'auto'
-                    ? 'Sent directly to kitchen.'
-                    : 'Waiting for cashier confirmation.'}
+          {/* Real-Time KDS Order Status Indicator */}
+          {liveOrderStatus && (
+            <section
+              aria-label="Live order status"
+              data-testid="guest-order-status-tracker"
+              className={`rounded-xl border p-3.5 space-y-3 ${
+                liveOrderStatus.stage === 'declined'
+                  ? 'border-red-200 bg-red-50/70'
+                  : liveOrderStatus.stage === 'ready'
+                    ? 'border-emerald-300 bg-emerald-50/80'
+                    : 'border-slate-200 bg-slate-50/80'
+              }`}
+            >
+              {liveOrderStatus.stage === 'declined' ? (
+                <div className="flex items-start gap-2.5 text-xs">
+                  <XCircle className="h-4 w-4 text-red-600 shrink-0 mt-0.5" />
+                  <div>
+                    <div className="font-bold text-red-900">{copy.declinedTitle}</div>
+                    <div className="text-red-700 mt-0.5">{copy.declinedSubtitle}</div>
+                  </div>
                 </div>
-              </div>
-            </div>
+              ) : (
+                <>
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="inline-flex h-2 w-2 rounded-full bg-emerald-600 animate-pulse shrink-0" />
+                      <span className="text-xs font-bold text-slate-900 truncate">
+                        {copy.liveOrderStatus}
+                        {liveOrderStatus.orderNumber ? ` · #${liveOrderStatus.orderNumber}` : ''}
+                      </span>
+                    </div>
+                    <span
+                      data-testid="guest-order-current-stage"
+                      className={`shrink-0 rounded-md px-2 py-0.5 text-[11px] font-bold ${
+                        liveOrderStatus.stage === 'ready' || liveOrderStatus.stage === 'served'
+                          ? 'bg-emerald-800 text-white'
+                          : liveOrderStatus.stage === 'preparing'
+                            ? 'bg-amber-500 text-white'
+                            : 'bg-slate-800 text-white'
+                      }`}
+                    >
+                      {copy.stages[Math.max(0, activeStageIdx)]?.label}
+                    </span>
+                  </div>
+
+                  {/* 4-Step Visual Progress Bar */}
+                  <div className="grid grid-cols-4 gap-1.5">
+                    {copy.stages.map((st, idx) => {
+                      const isDone = idx < activeStageIdx;
+                      const isCurrent = idx === activeStageIdx;
+                      const StepIcon =
+                        st.id === 'received'
+                          ? Clock
+                          : st.id === 'preparing'
+                            ? ChefHat
+                            : st.id === 'ready'
+                              ? CheckCircle2
+                              : UtensilsCrossed;
+                      return (
+                        <div key={st.id} className="space-y-1 text-center">
+                          <div
+                            className={`h-1.5 rounded-full transition-colors ${
+                              isDone || isCurrent
+                                ? st.id === 'preparing' && isCurrent
+                                  ? 'bg-amber-500'
+                                  : 'bg-emerald-700'
+                                : 'bg-slate-200'
+                            }`}
+                          />
+                          <div
+                            className={`inline-flex items-center justify-center gap-1 text-[11px] font-semibold ${
+                              isCurrent
+                                ? 'text-slate-900 font-bold'
+                                : isDone
+                                  ? 'text-emerald-800'
+                                  : 'text-slate-400'
+                            }`}
+                          >
+                            <StepIcon className="h-3 w-3 shrink-0" />
+                            <span>{st.label}</span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {/* Subtitle & Station Sync Info */}
+                  <div className="flex flex-wrap items-center justify-between gap-1.5 text-[11px] text-slate-600">
+                    <span>
+                      {liveOrderStatus.awaitingConfirmation
+                        ? copy.awaitingConfirm
+                        : copy.stages[Math.max(0, activeStageIdx)]?.hint}
+                    </span>
+                    <span className="text-slate-500">{copy.syncedWithKds}</span>
+                  </div>
+
+                  {/* Tracked Items with per-item KDS badge */}
+                  <div className="border-t border-slate-200/80 pt-2 space-y-1">
+                    {liveOrderStatus.items.slice(0, 4).map((item) => {
+                      const itemLabel =
+                        copy.stages.find((s) => s.id === item.stage)?.label || item.stage;
+                      return (
+                        <div
+                          key={item.id}
+                          className="flex items-center justify-between gap-2 text-[11px]"
+                        >
+                          <span className="text-slate-700 truncate">
+                            <strong className="tabular-nums">{item.qty}×</strong> {getTitle(item)}
+                          </span>
+                          <span
+                            className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold ${
+                              item.stage === 'ready' || item.stage === 'served'
+                                ? 'bg-emerald-100 text-emerald-900'
+                                : item.stage === 'preparing'
+                                  ? 'bg-amber-100 text-amber-900'
+                                  : 'bg-slate-200 text-slate-700'
+                            }`}
+                          >
+                            {itemLabel}
+                          </span>
+                        </div>
+                      );
+                    })}
+                    {liveOrderStatus.items.length > 4 && (
+                      <div className="text-[10px] text-slate-400">
+                        +{liveOrderStatus.items.length - 4} more items
+                      </div>
+                    )}
+                  </div>
+                </>
+              )}
+            </section>
           )}
         </div>
 

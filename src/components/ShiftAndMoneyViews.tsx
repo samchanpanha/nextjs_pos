@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { usePos } from '../context/PosContext';
 import { calculateDrawerReconciliation, roundCurrency, usdToKhr } from '../utils/posMath';
+import { AiForecastWidget } from './AiForecastWidget';
 
 const USD_DENOMS = [100, 50, 20, 10, 5, 1] as const;
 const KHR_DENOMS = [100000, 50000, 20000, 10000, 5000, 1000, 500] as const;
@@ -316,6 +317,8 @@ export function TodaysMoneyView() {
           </div>
         </div>
       </div>
+
+      <AiForecastWidget />
     </div>
   );
 }

@@ -85,6 +85,16 @@ export function ReceiptInvoiceDocument({
       : 'Scan for e-bill & loyalty points';
 
   const dateText = new Date(order.closedAt || order.updatedAt).toLocaleString();
+  const loyaltyDiscountUsd =
+    order.pointsRedeemed > 0
+      ? Number(((order.pointsRedeemed / 100) * branch.pointsValuePer100).toFixed(2))
+      : 0;
+  const showLoyaltyBlock = Boolean(
+    order.memberPhone ||
+      (order.loyaltyPointsEarned ?? 0) > 0 ||
+      order.pointsRedeemed > 0 ||
+      (order.loyaltyItemPointsRedeemed ?? 0) > 0
+  );
 
   // Style 1: Formal A4 Tax / Commercial Invoice Layout
   if (tpl.style === 'a4_tax_invoice') {
@@ -181,7 +191,11 @@ export function ReceiptInvoiceDocument({
                   ${item.unitPriceUsd.toFixed(2)}
                 </td>
                 <td className="py-2 px-2.5 text-right font-semibold tabular-nums">
-                  {item.coveredByPack ? 'Pack ($0.00)' : `$${(item.unitPriceUsd * item.qty).toFixed(2)}`}
+                  {item.coveredByPack
+                    ? 'Pack ($0.00)'
+                    : item.redeemedByLoyalty
+                      ? `Loyalty Free (-${item.loyaltyPointsCost || 0} pts)`
+                      : `$${(item.unitPriceUsd * item.qty).toFixed(2)}`}
                 </td>
               </tr>
             ))}
@@ -232,6 +246,35 @@ export function ReceiptInvoiceDocument({
               <span>TOTAL KHR</span>
               <span>{khrTotal.toLocaleString()} ៛</span>
             </div>
+            {showLoyaltyBlock && (
+              <div className="mt-2 rounded border border-amber-200 bg-amber-50/70 p-2 text-[10px] text-amber-950 space-y-0.5">
+                <div className="font-bold">Loyalty Member ({order.memberPhone || 'Member'})</div>
+                {order.pointsRedeemed > 0 && (
+                  <div className="flex justify-between">
+                    <span>Discount redeemed ({order.pointsRedeemed} pts)</span>
+                    <span>-${loyaltyDiscountUsd.toFixed(2)}</span>
+                  </div>
+                )}
+                {(order.loyaltyItemPointsRedeemed ?? 0) > 0 && (
+                  <div className="flex justify-between">
+                    <span>Free item redeemed</span>
+                    <span>-{order.loyaltyItemPointsRedeemed} pts</span>
+                  </div>
+                )}
+                {(order.loyaltyPointsEarned ?? 0) > 0 && (
+                  <div className="flex justify-between font-semibold text-emerald-800">
+                    <span>Points earned</span>
+                    <span>+{order.loyaltyPointsEarned} pts</span>
+                  </div>
+                )}
+                {typeof order.loyaltyPointsBalanceAfter === 'number' && (
+                  <div className="flex justify-between font-bold border-t border-amber-200 pt-0.5">
+                    <span>New balance</span>
+                    <span>{order.loyaltyPointsBalanceAfter.toLocaleString()} pts</span>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </div>
 
@@ -324,7 +367,11 @@ export function ReceiptInvoiceDocument({
                   )}
                 </div>
                 <div className="text-right font-semibold tabular-nums shrink-0">
-                  {item.coveredByPack ? 'Pack ($0.00)' : `$${(item.unitPriceUsd * item.qty).toFixed(2)}`}
+                  {item.coveredByPack
+                    ? 'Pack ($0.00)'
+                    : item.redeemedByLoyalty
+                      ? 'Loyalty Free ($0.00)'
+                      : `$${(item.unitPriceUsd * item.qty).toFixed(2)}`}
                 </div>
               </div>
             ))}
@@ -368,6 +415,35 @@ export function ReceiptInvoiceDocument({
                 {order.paidKhr > 0 ? ` + ${order.paidKhr.toLocaleString()} ៛` : ''}
               </span>
             </div>
+            {showLoyaltyBlock && (
+              <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50/70 p-2 text-[10px] text-amber-950 space-y-0.5">
+                <div className="font-bold">Loyalty ({order.memberPhone || 'Member'})</div>
+                {order.pointsRedeemed > 0 && (
+                  <div className="flex justify-between">
+                    <span>Points discount</span>
+                    <span>-{order.pointsRedeemed} pts (-${loyaltyDiscountUsd.toFixed(2)})</span>
+                  </div>
+                )}
+                {(order.loyaltyItemPointsRedeemed ?? 0) > 0 && (
+                  <div className="flex justify-between">
+                    <span>Free item reward</span>
+                    <span>-{order.loyaltyItemPointsRedeemed} pts</span>
+                  </div>
+                )}
+                {(order.loyaltyPointsEarned ?? 0) > 0 && (
+                  <div className="flex justify-between font-semibold text-emerald-800">
+                    <span>Points earned</span>
+                    <span>+{order.loyaltyPointsEarned} pts</span>
+                  </div>
+                )}
+                {typeof order.loyaltyPointsBalanceAfter === 'number' && (
+                  <div className="flex justify-between font-bold border-t border-amber-200 pt-0.5">
+                    <span>Updated balance</span>
+                    <span>{order.loyaltyPointsBalanceAfter.toLocaleString()} pts</span>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           <div className="flex flex-col items-center text-center pt-1 space-y-1.5">
@@ -452,6 +528,8 @@ export function ReceiptInvoiceDocument({
             <div className="text-right tabular-nums shrink-0">
               {item.coveredByPack ? (
                 <span>Pack ($0.00)</span>
+              ) : item.redeemedByLoyalty ? (
+                <span>Free (Loyalty)</span>
               ) : (
                 <span>${(item.unitPriceUsd * item.qty).toFixed(2)}</span>
               )}
@@ -510,6 +588,35 @@ export function ReceiptInvoiceDocument({
             <span>
               ${order.changeUsd} + {order.changeKhr.toLocaleString()} ៛
             </span>
+          </div>
+        )}
+        {showLoyaltyBlock && (
+          <div className="mt-2 pt-2 border-t border-dashed border-slate-300 space-y-0.5 text-[10px]">
+            <div className="font-bold">LOYALTY ({order.memberPhone || 'Member'})</div>
+            {order.pointsRedeemed > 0 && (
+              <div className="flex justify-between">
+                <span>Discount ({order.pointsRedeemed} pts)</span>
+                <span>-${loyaltyDiscountUsd.toFixed(2)}</span>
+              </div>
+            )}
+            {(order.loyaltyItemPointsRedeemed ?? 0) > 0 && (
+              <div className="flex justify-between">
+                <span>Free item reward</span>
+                <span>-{order.loyaltyItemPointsRedeemed} pts</span>
+              </div>
+            )}
+            {(order.loyaltyPointsEarned ?? 0) > 0 && (
+              <div className="flex justify-between font-semibold">
+                <span>Points earned</span>
+                <span>+{order.loyaltyPointsEarned} pts</span>
+              </div>
+            )}
+            {typeof order.loyaltyPointsBalanceAfter === 'number' && (
+              <div className="flex justify-between font-bold">
+                <span>New balance</span>
+                <span>{order.loyaltyPointsBalanceAfter.toLocaleString()} pts</span>
+              </div>
+            )}
           </div>
         )}
       </div>

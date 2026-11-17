@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
-import { Tag, Gift, Users, Send, Sparkles, Plus, Ban } from 'lucide-react';
+import { Tag, Gift, Users, Send, Sparkles, Plus, Ban, Search, Award, History, X, Settings2 } from 'lucide-react';
 import { usePos } from '../context/PosContext';
 import type { PromotionRule } from '../utils/posMath';
+import { getNextTierProgress, searchMembers } from '../utils/loyaltyEngine';
 
 type PromoSubTab = 'promotions' | 'prepaid' | 'members' | 'campaign';
 
@@ -15,6 +16,10 @@ export function PromotionsCustomersView() {
     sellPrepaidPack,
     voidCustomerPack,
     addLoyaltyMember,
+    adjustMemberPoints,
+    saveLoyaltyReward,
+    toggleLoyaltyReward,
+    updateLoyaltyRules,
   } = usePos();
 
   const [subTab, setSubTab] = useState<PromoSubTab>('promotions');
@@ -42,10 +47,29 @@ export function PromotionsCustomersView() {
   const [buyerName, setBuyerName] = useState('');
   const [buyerPhone, setBuyerPhone] = useState('');
 
-  // New Loyalty Member enrollment
+  // New Loyalty Member enrollment & management
   const [memberName, setMemberName] = useState('');
   const [memberPhone, setMemberPhone] = useState('');
   const [memberBonusPts, setMemberBonusPts] = useState('20');
+  const [memberSearch, setMemberSearch] = useState('');
+  const [selectedMemberId, setSelectedMemberId] = useState<string | null>(null);
+  const [adjustDelta, setAdjustDelta] = useState('50');
+  const [adjustReason, setAdjustReason] = useState('VIP appreciation bonus');
+
+  // Loyalty earn/redeem rules & free-item rewards
+  const [pointsEnabledDraft, setPointsEnabledDraft] = useState(activeBranch.pointsEnabled);
+  const [pointsPerDollarDraft, setPointsPerDollarDraft] = useState(
+    String(activeBranch.pointsPerDollar)
+  );
+  const [pointsValueDraft, setPointsValueDraft] = useState(
+    String(activeBranch.pointsValuePer100)
+  );
+  const branchMenuItems = state.menuItems.filter(
+    (m) => m.branchId === activeBranch.id && m.active
+  );
+  const [rewardMenuItemId, setRewardMenuItemId] = useState(branchMenuItems[0]?.id || '');
+  const [rewardTitle, setRewardTitle] = useState('');
+  const [rewardCost, setRewardCost] = useState('150');
 
   // AI Telegram campaign writer
   const [campPromo, setCampPromo] = useState('Happy Hour 14:00–17:00');
@@ -408,107 +432,460 @@ export function PromotionsCustomersView() {
         </div>
       )}
 
-      {subTab === 'members' && (
-        <div className="rounded-xl border border-slate-200 bg-white p-4 space-y-4">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <h2 className="text-sm font-bold text-slate-900 flex items-center gap-2">
-              <Users className="h-4 w-4 text-emerald-800" />
-              Loyalty members &amp; Telegram points ({state.members.length})
-            </h2>
-            <div className="text-xs text-slate-600 tabular-nums">
-              Earn {activeBranch.pointsPerDollar} pt/$1 · Redeem 100 pts = $
-              {activeBranch.pointsValuePer100.toFixed(2)} · Bot{' '}
-              <span className="font-mono font-semibold">{activeBranch.telegramChannel}</span>
-            </div>
-          </div>
+      {subTab === 'members' && (() => {
+        const filteredMembers = searchMembers(state.members, memberSearch);
+        const branchRewards = (state.loyaltyRewards || []).filter(
+          (r) => r.branchId === activeBranch.id
+        );
+        const inspectedMember = selectedMemberId
+          ? state.members.find((m) => m.id === selectedMemberId) || null
+          : null;
 
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              if (!memberName.trim() || !memberPhone.trim()) return;
-              addLoyaltyMember({
-                name: memberName,
-                phone: memberPhone,
-                initialPoints: Number(memberBonusPts) || 0,
-              });
-              setMemberName('');
-              setMemberPhone('');
-            }}
-            className="grid grid-cols-1 sm:grid-cols-4 gap-2 rounded-xl bg-slate-50 border border-slate-200 p-3"
-          >
-            <input
-              required
-              placeholder="Customer full name"
-              value={memberName}
-              onChange={(e) => setMemberName(e.target.value)}
-              className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs"
-            />
-            <input
-              required
-              placeholder="Phone (e.g. 012 888 999)"
-              value={memberPhone}
-              onChange={(e) => setMemberPhone(e.target.value)}
-              className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-mono"
-            />
-            <input
-              type="number"
-              min={0}
-              placeholder="Welcome bonus pts"
-              value={memberBonusPts}
-              onChange={(e) => setMemberBonusPts(e.target.value)}
-              className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs tabular-nums"
-            />
-            <button
-              type="submit"
-              className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-emerald-800 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-900"
-            >
-              <Plus className="h-3.5 w-3.5" /> Enroll Member
-            </button>
-          </form>
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs">
-              <thead>
-                <tr className="border-b border-slate-200 text-left text-slate-500">
-                  <th className="py-2 pr-3 font-semibold">Member</th>
-                  <th className="py-2 pr-3 font-semibold">Phone</th>
-                  <th className="py-2 pr-3 font-semibold">Tier</th>
-                  <th className="py-2 pr-3 font-semibold text-right">Points</th>
-                  <th className="py-2 pr-3 font-semibold text-right">Total Spent</th>
-                  <th className="py-2 font-semibold text-right">Last Visit</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100">
-                {state.members.map((m) => (
-                  <tr key={m.id}>
-                    <td className="py-2.5 pr-3 font-semibold text-slate-900">{m.name}</td>
-                    <td className="py-2.5 pr-3 font-mono">{m.phone}</td>
-                    <td className="py-2.5 pr-3">
-                      <span
-                        className={`rounded px-2 py-0.5 text-[11px] font-semibold ${
-                          m.tier === 'Gold'
-                            ? 'bg-amber-100 text-amber-900'
-                            : m.tier === 'Silver'
-                              ? 'bg-slate-200 text-slate-800'
-                              : 'bg-emerald-50 text-emerald-800'
-                        }`}
-                      >
-                        {m.tier}
+        return (
+          <div className="space-y-4">
+            {/* Loyalty Program Rules + Free-Item Rewards Catalog */}
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+              <div className="lg:col-span-5 rounded-xl border border-slate-200 bg-white p-4 space-y-3">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                    <Settings2 className="h-4 w-4 text-emerald-800" />
+                    Loyalty earn &amp; redeem rules
+                  </h2>
+                  <label className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-700 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={pointsEnabledDraft}
+                      onChange={(e) => setPointsEnabledDraft(e.target.checked)}
+                      className="rounded border-slate-300 text-emerald-800 focus:ring-emerald-700"
+                    />
+                    Active
+                  </label>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2.5 text-xs">
+                  <div>
+                    <label className="block font-semibold text-slate-600 mb-1">
+                      Earn (pts per $1)
+                    </label>
+                    <input
+                      type="number"
+                      min={1}
+                      max={100}
+                      value={pointsPerDollarDraft}
+                      onChange={(e) => setPointsPerDollarDraft(e.target.value)}
+                      className="w-full rounded-lg border border-slate-300 px-2.5 py-1.5 tabular-nums"
+                    />
+                  </div>
+                  <div>
+                    <label className="block font-semibold text-slate-600 mb-1">
+                      100 pts value ($)
+                    </label>
+                    <input
+                      type="number"
+                      min={0.1}
+                      step={0.1}
+                      value={pointsValueDraft}
+                      onChange={(e) => setPointsValueDraft(e.target.value)}
+                      className="w-full rounded-lg border border-slate-300 px-2.5 py-1.5 tabular-nums"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-between pt-1">
+                  <span className="text-[11px] text-slate-500">
+                    Silver ≥ $100 spent · Gold ≥ $500 spent
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      updateLoyaltyRules({
+                        pointsEnabled: pointsEnabledDraft,
+                        pointsPerDollar: Math.max(1, Number(pointsPerDollarDraft) || 10),
+                        pointsValuePer100: Math.max(0.1, Number(pointsValueDraft) || 1),
+                      })
+                    }
+                    className="rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white hover:bg-slate-800"
+                  >
+                    Save Rules
+                  </button>
+                </div>
+              </div>
+
+              <div className="lg:col-span-7 rounded-xl border border-slate-200 bg-white p-4 space-y-3">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                    <Gift className="h-4 w-4 text-amber-600" />
+                    Free-item rewards catalog ({branchRewards.filter((r) => r.active).length} active)
+                  </h2>
+                  <span className="text-[11px] text-slate-500">Redeemable at checkout</span>
+                </div>
+
+                <div className="flex flex-wrap gap-2">
+                  {branchRewards.map((rw) => (
+                    <button
+                      key={rw.id}
+                      type="button"
+                      onClick={() => toggleLoyaltyReward(rw.id)}
+                      className={`inline-flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-xs font-semibold transition-colors ${
+                        rw.active
+                          ? 'border-amber-300 bg-amber-50 text-amber-950 hover:bg-amber-100'
+                          : 'border-slate-200 bg-slate-50 text-slate-400 line-through'
+                      }`}
+                    >
+                      <span>{rw.name}</span>
+                      <span className="rounded bg-white px-1.5 py-0.5 text-[10px] font-bold text-amber-900 tabular-nums border border-amber-200">
+                        {rw.pointsCost} pts
                       </span>
-                    </td>
-                    <td className="py-2.5 pr-3 text-right font-bold tabular-nums text-emerald-800">
-                      {m.points.toLocaleString()} pts
-                    </td>
-                    <td className="py-2.5 pr-3 text-right tabular-nums">
-                      ${m.totalSpentUsd.toFixed(2)}
-                    </td>
-                    <td className="py-2.5 text-right text-slate-500">{m.lastVisit}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+                    </button>
+                  ))}
+                </div>
+
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    const picked = branchMenuItems.find((m) => m.id === rewardMenuItemId) || branchMenuItems[0];
+                    if (!picked) return;
+                    saveLoyaltyReward({
+                      name: rewardTitle.trim() || `Free ${picked.nameEn}`,
+                      menuItemId: picked.id,
+                      menuItemName: picked.nameEn,
+                      pointsCost: Number(rewardCost) || 150,
+                      active: true,
+                    });
+                    setRewardTitle('');
+                  }}
+                  className="grid grid-cols-1 sm:grid-cols-12 gap-2 pt-2 border-t border-slate-100 text-xs"
+                >
+                  <select
+                    value={rewardMenuItemId}
+                    onChange={(e) => setRewardMenuItemId(e.target.value)}
+                    className="sm:col-span-5 rounded-lg border border-slate-300 bg-white px-2.5 py-1.5"
+                  >
+                    {branchMenuItems.map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.nameEn} (${m.priceUsd.toFixed(2)})
+                      </option>
+                    ))}
+                  </select>
+                  <input
+                    placeholder="Reward label (e.g. Free Iced Coffee)"
+                    value={rewardTitle}
+                    onChange={(e) => setRewardTitle(e.target.value)}
+                    className="sm:col-span-3 rounded-lg border border-slate-300 px-2.5 py-1.5"
+                  />
+                  <input
+                    type="number"
+                    min={10}
+                    step={10}
+                    value={rewardCost}
+                    onChange={(e) => setRewardCost(e.target.value)}
+                    placeholder="Pts"
+                    className="sm:col-span-2 rounded-lg border border-slate-300 px-2.5 py-1.5 tabular-nums"
+                  />
+                  <button
+                    type="submit"
+                    className="sm:col-span-2 rounded-lg bg-emerald-800 px-2.5 py-1.5 font-semibold text-white hover:bg-emerald-900"
+                  >
+                    + Reward
+                  </button>
+                </form>
+              </div>
+            </div>
+
+            {/* Members Directory */}
+            <div className="rounded-xl border border-slate-200 bg-white p-4 space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h2 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                  <Users className="h-4 w-4 text-emerald-800" />
+                  Loyalty members &amp; customer profiles ({state.members.length})
+                </h2>
+                <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-2.5 py-1 text-xs">
+                    <Search className="h-3.5 w-3.5 text-slate-400" />
+                    <input
+                      type="text"
+                      value={memberSearch}
+                      onChange={(e) => setMemberSearch(e.target.value)}
+                      placeholder="Search name or phone..."
+                      className="w-44 focus:outline-none"
+                    />
+                  </div>
+                  <span className="hidden md:inline text-xs text-slate-600 tabular-nums">
+                    Earn {activeBranch.pointsPerDollar} pt/$1 · 100 pts = $
+                    {activeBranch.pointsValuePer100.toFixed(2)}
+                  </span>
+                </div>
+              </div>
+
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  if (!memberName.trim() || !memberPhone.trim()) return;
+                  addLoyaltyMember({
+                    name: memberName,
+                    phone: memberPhone,
+                    initialPoints: Number(memberBonusPts) || 0,
+                  });
+                  setMemberName('');
+                  setMemberPhone('');
+                }}
+                className="grid grid-cols-1 sm:grid-cols-4 gap-2 rounded-xl bg-slate-50 border border-slate-200 p-3"
+              >
+                <input
+                  required
+                  placeholder="Customer full name"
+                  value={memberName}
+                  onChange={(e) => setMemberName(e.target.value)}
+                  className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs"
+                />
+                <input
+                  required
+                  placeholder="Phone (e.g. 012 888 999)"
+                  value={memberPhone}
+                  onChange={(e) => setMemberPhone(e.target.value)}
+                  className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-mono"
+                />
+                <input
+                  type="number"
+                  min={0}
+                  placeholder="Welcome bonus pts"
+                  value={memberBonusPts}
+                  onChange={(e) => setMemberBonusPts(e.target.value)}
+                  className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs tabular-nums"
+                />
+                <button
+                  type="submit"
+                  className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-emerald-800 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-900"
+                >
+                  <Plus className="h-3.5 w-3.5" /> Enroll Member
+                </button>
+              </form>
+
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="border-b border-slate-200 text-left text-slate-500">
+                      <th className="py-2 pr-3 font-semibold">Member</th>
+                      <th className="py-2 pr-3 font-semibold">Phone</th>
+                      <th className="py-2 pr-3 font-semibold">Tier</th>
+                      <th className="py-2 pr-3 font-semibold text-right">Points</th>
+                      <th className="py-2 pr-3 font-semibold text-right">Total Spent</th>
+                      <th className="py-2 pr-3 font-semibold text-right">Last Visit</th>
+                      <th className="py-2 font-semibold text-right">Profile &amp; History</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {filteredMembers.map((m) => (
+                      <tr key={m.id} className="hover:bg-slate-50/70">
+                        <td className="py-2.5 pr-3 font-semibold text-slate-900">{m.name}</td>
+                        <td className="py-2.5 pr-3 font-mono">{m.phone}</td>
+                        <td className="py-2.5 pr-3">
+                          <span
+                            className={`rounded px-2 py-0.5 text-[11px] font-semibold ${
+                              m.tier === 'Gold'
+                                ? 'bg-amber-100 text-amber-900'
+                                : m.tier === 'Silver'
+                                  ? 'bg-slate-200 text-slate-800'
+                                  : 'bg-emerald-50 text-emerald-800'
+                            }`}
+                          >
+                            {m.tier}
+                          </span>
+                        </td>
+                        <td className="py-2.5 pr-3 text-right font-bold tabular-nums text-emerald-800">
+                          {m.points.toLocaleString()} pts
+                        </td>
+                        <td className="py-2.5 pr-3 text-right tabular-nums">
+                          ${m.totalSpentUsd.toFixed(2)}
+                        </td>
+                        <td className="py-2.5 pr-3 text-right text-slate-500">{m.lastVisit}</td>
+                        <td className="py-2.5 text-right">
+                          <button
+                            type="button"
+                            onClick={() => setSelectedMemberId(m.id)}
+                            className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-100"
+                          >
+                            <History className="h-3 w-3" />
+                            Profile ({m.loyaltyHistory?.length || 0})
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* Customer Loyalty Profile & Points Activity Modal */}
+            {inspectedMember && (() => {
+              const tierInfo = getNextTierProgress(inspectedMember.totalSpentUsd);
+              const history = inspectedMember.loyaltyHistory || [];
+              return (
+                <div
+                  className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4"
+                  role="dialog"
+                  aria-modal="true"
+                  aria-label={`Customer profile ${inspectedMember.name}`}
+                >
+                  <div className="w-full max-w-2xl rounded-2xl border border-slate-200 bg-white shadow-2xl overflow-hidden flex flex-col max-h-[88vh]">
+                    <div className="flex items-center justify-between border-b border-slate-200 px-5 py-3.5">
+                      <div className="flex items-center gap-2.5">
+                        <div className="h-9 w-9 rounded-full bg-amber-100 text-amber-900 flex items-center justify-center">
+                          <Award className="h-5 w-5" />
+                        </div>
+                        <div>
+                          <h3 className="text-base font-bold text-slate-900">
+                            {inspectedMember.name}{' '}
+                            <span className="ml-1 rounded bg-amber-100 px-2 py-0.5 text-[11px] font-bold text-amber-900">
+                              {inspectedMember.tier}
+                            </span>
+                          </h3>
+                          <p className="text-xs font-mono text-slate-500">
+                            {inspectedMember.phone} · Last visit {inspectedMember.lastVisit}
+                          </p>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedMemberId(null)}
+                        aria-label="Close customer profile"
+                        className="rounded-lg p-1.5 text-slate-500 hover:bg-slate-100"
+                      >
+                        <X className="h-5 w-5" />
+                      </button>
+                    </div>
+
+                    <div className="flex-1 overflow-y-auto p-5 space-y-4">
+                      <div className="grid grid-cols-3 gap-3">
+                        <div className="rounded-xl border border-emerald-200 bg-emerald-50/70 p-3">
+                          <div className="text-[11px] text-emerald-800 font-semibold">
+                            Available Points
+                          </div>
+                          <div className="text-2xl font-bold text-emerald-950 tabular-nums mt-0.5">
+                            {inspectedMember.points.toLocaleString()} pts
+                          </div>
+                          <div className="text-[11px] text-emerald-700 mt-0.5">
+                            Value: $
+                            {(
+                              (inspectedMember.points / 100) *
+                              activeBranch.pointsValuePer100
+                            ).toFixed(2)}
+                          </div>
+                        </div>
+
+                        <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                          <div className="text-[11px] text-slate-500 font-semibold">
+                            Lifetime Spend
+                          </div>
+                          <div className="text-2xl font-bold text-slate-900 tabular-nums mt-0.5">
+                            ${inspectedMember.totalSpentUsd.toFixed(2)}
+                          </div>
+                          <div className="text-[11px] text-slate-500 mt-0.5">
+                            {history.filter((h) => h.type === 'earn').length} earning visits logged
+                          </div>
+                        </div>
+
+                        <div className="rounded-xl border border-amber-200 bg-amber-50/60 p-3">
+                          <div className="text-[11px] text-amber-900 font-semibold">
+                            Tier Progress
+                          </div>
+                          <div className="text-sm font-bold text-amber-950 mt-1">
+                            {tierInfo.nextTier
+                              ? `$${tierInfo.remainingUsd.toFixed(2)} to ${tierInfo.nextTier}`
+                              : 'Top Gold Tier!'}
+                          </div>
+                          <div className="mt-2 h-2 w-full rounded-full bg-amber-200 overflow-hidden">
+                            <div
+                              className="h-full bg-amber-600 rounded-full"
+                              style={{ width: `${tierInfo.progressPercent}%` }}
+                            />
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Manual Bonus / Point Adjustment */}
+                      <form
+                        onSubmit={(e) => {
+                          e.preventDefault();
+                          const delta = Number(adjustDelta);
+                          if (!delta) return;
+                          adjustMemberPoints(inspectedMember.id, delta, adjustReason);
+                        }}
+                        className="rounded-xl border border-slate-200 bg-slate-50 p-3 flex flex-wrap items-center gap-2 text-xs"
+                      >
+                        <span className="font-semibold text-slate-700">Adjust points:</span>
+                        <input
+                          type="number"
+                          value={adjustDelta}
+                          onChange={(e) => setAdjustDelta(e.target.value)}
+                          className="w-24 rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 tabular-nums"
+                          placeholder="+50 or -50"
+                        />
+                        <input
+                          type="text"
+                          value={adjustReason}
+                          onChange={(e) => setAdjustReason(e.target.value)}
+                          className="flex-1 min-w-[160px] rounded-lg border border-slate-300 bg-white px-2.5 py-1.5"
+                          placeholder="Reason (e.g. Birthday bonus)"
+                        />
+                        <button
+                          type="submit"
+                          className="rounded-lg bg-slate-900 px-3 py-1.5 font-semibold text-white hover:bg-slate-800"
+                        >
+                          Apply Adjustment
+                        </button>
+                      </form>
+
+                      {/* Points Ledger History */}
+                      <div>
+                        <h4 className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-2">
+                          Points Activity History
+                        </h4>
+                        {history.length === 0 ? (
+                          <div className="rounded-xl border border-dashed border-slate-200 p-6 text-center text-xs text-slate-400">
+                            No points transactions recorded yet. Attach this member at checkout to start earning points.
+                          </div>
+                        ) : (
+                          <div className="rounded-xl border border-slate-200 divide-y divide-slate-100 max-h-60 overflow-y-auto">
+                            {history.map((tx) => (
+                              <div
+                                key={tx.id}
+                                className="px-3.5 py-2.5 flex items-center justify-between gap-3 text-xs"
+                              >
+                                <div className="min-w-0">
+                                  <div className="font-semibold text-slate-900 truncate">
+                                    {tx.description}
+                                  </div>
+                                  <div className="text-[11px] text-slate-500">
+                                    {new Date(tx.createdAt).toLocaleString()} ·{' '}
+                                    <span className="uppercase font-mono">{tx.type.replace('_', ' ')}</span>
+                                  </div>
+                                </div>
+                                <div className="text-right tabular-nums shrink-0">
+                                  <div
+                                    className={`font-bold ${
+                                      tx.pointsDelta >= 0 ? 'text-emerald-700' : 'text-amber-800'
+                                    }`}
+                                  >
+                                    {tx.pointsDelta >= 0 ? `+${tx.pointsDelta}` : tx.pointsDelta} pts
+                                  </div>
+                                  <div className="text-[10px] text-slate-400">
+                                    Bal: {tx.balanceAfter} pts
+                                  </div>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {subTab === 'campaign' && (
         <div className="rounded-xl border border-slate-200 bg-white p-5 max-w-2xl space-y-4">

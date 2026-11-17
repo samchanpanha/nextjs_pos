@@ -9,6 +9,7 @@ import React, {
 } from 'react';
 import {
   CLIENT_TAB_ID,
+  SyncConflictClientError,
   activateSubscriptionInSqlite,
   createTenantInSqlite,
   deleteTenantFromSqlite,
@@ -23,6 +24,13 @@ import {
   subscribeToSqliteRealtime,
   verifyStaffPinOnSqlite,
 } from '../lib/sqliteClient';
+import type { AiStaffStockAlert } from '../utils/aiStockMonitor';
+import {
+  clearOfflineTenantCache,
+  loadOfflineTenantCache,
+  saveOfflineTenantCache,
+  type SyncConflictInfo,
+} from '../utils/syncStatus';
 import {
   cloneBranchResources,
   createSeedState,
@@ -39,6 +47,8 @@ import type {
   LanguageCode,
   LedgerAccount,
   LoyaltyMember,
+  LoyaltyReward,
+  LoyaltyTransaction,
   MenuItem,
   NavSection,
   OperatingExpense,
@@ -125,6 +135,15 @@ import {
   isDemoTenantWorkspace,
   resolveTenantStaffSignIn,
 } from '../utils/tenantAccess';
+import {
+  applyLoyaltyRewardToOrderItems,
+  createDefaultLoyaltyRewards,
+  findMemberByPhone,
+  getOrderLoyaltyItemPointsUsed,
+  normalizeCustomerPhone,
+  removeLoyaltyRewardLine,
+  settleMemberLoyalty,
+} from '../utils/loyaltyEngine';
 
 const STORAGE_KEY = 'xaiwork_pos_state_v1';
 const TENANTS_STORAGE_KEY = 'xaiwork_pos_tenants_v1';
@@ -169,6 +188,12 @@ interface PosContextValue {
   authLoading: boolean;
   cloudStatus: 'demo' | 'synced' | 'syncing' | 'error';
   sseConnected: boolean;
+  networkOnline: boolean;
+  lastSyncedAt: string | null;
+  syncErrorMessage: string | null;
+  syncConflict: SyncConflictInfo | null;
+  retrySyncNow: (options?: { forceOverwrite?: boolean }) => Promise<boolean>;
+  resolveConflictUseServer: () => Promise<boolean>;
   loginWithEmailPassword: (email: string, password: string) => Promise<void>;
   registerWithEmailPassword: (
     email: string,
@@ -181,10 +206,23 @@ interface PosContextValue {
   toasts: { id: string; message: string; tone: 'success' | 'info' | 'warning' | 'error' }[];
   notify: (message: string, tone?: 'success' | 'info' | 'warning' | 'error') => void;
   dismissToast: (id: string) => void;
+  aiStockAlerts: AiStaffStockAlert[];
+  publishAiStockAlerts: (
+    branchId: string,
+    alerts: AiStaffStockAlert[],
+    options?: { showToast?: boolean; forceToast?: boolean }
+  ) => number;
+  dismissAiStockAlert: (alertId: string) => void;
   setOrderGuests: (orderId: string, guests: number) => void;
   cancelEmptyOrder: (orderId: string) => boolean;
   voidOrder: (orderId: string, reason: string, managerPin: string) => boolean;
   addLoyaltyMember: (params: { name: string; phone: string; initialPoints?: number }) => LoyaltyMember | null;
+  adjustMemberPoints: (memberId: string, delta: number, reason: string) => boolean;
+  saveLoyaltyReward: (reward: Omit<LoyaltyReward, 'id' | 'branchId'> & { id?: string }) => void;
+  toggleLoyaltyReward: (rewardId: string) => void;
+  updateLoyaltyRules: (
+    partial: Partial<Pick<BranchConfig, 'pointsEnabled' | 'pointsPerDollar' | 'pointsValuePer100'>>
+  ) => boolean;
   toggleTenantFeatureFlag: (moduleKey: string, enabled: boolean) => void;
   reloadTenantsFromSqlite: () => Promise<void>;
   selectedTableId: string | null;
@@ -218,6 +256,8 @@ interface PosContextValue {
   applyOrderDiscount: (orderId: string, percent: number, flatUsd: number, managerPin: string) => boolean;
   setOrderPromoCode: (orderId: string, code: string) => void;
   attachMemberToOrder: (orderId: string, phone: string, redeemPoints: number) => void;
+  redeemLoyaltyItem: (orderId: string, rewardId: string) => boolean;
+  removeRedeemedLoyaltyItem: (orderId: string, lineId: string) => void;
   applyPrepaidPack: (orderId: string, customerPackId: string) => void;
   settleOrderPayment: (
     orderId: string,
@@ -390,6 +430,7 @@ function redactClientStoreDataForAdmin(st: PosAppState): PosAppState {
     prepaidTemplates: [],
     customerPacks: [],
     members: [],
+    loyaltyRewards: [],
     invoices: [],
     groupSessions: [],
     dailyRevenueHistory: [],
@@ -445,11 +486,18 @@ function normalizeTenantRbac(st: PosAppState): PosAppState {
       businessType: st.businessType,
     }),
   }));
+  const normalizedLoyaltyRewards: LoyaltyReward[] = Array.isArray(st.loyaltyRewards)
+    ? st.loyaltyRewards
+    : st.storeDataRedactedForAdmin
+      ? []
+      : normalizedBranches.flatMap((b) => createDefaultLoyaltyRewards(b.id, st.menuItems || []));
+
   return {
     ...st,
     isDemoTenant,
     tenantStatus: st.tenantStatus === 'suspended' ? 'suspended' : 'active',
     branches: normalizedBranches,
+    loyaltyRewards: normalizedLoyaltyRewards,
     ownerPermissions,
     staff: normalizedStaff,
   };
@@ -572,12 +620,27 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
   const [authLoading, setAuthLoading] = useState<boolean>(true);
   const [cloudStatus, setCloudStatus] = useState<'demo' | 'synced' | 'syncing' | 'error'>('synced');
   const [sseConnected, setSseConnected] = useState<boolean>(false);
+  const [networkOnline, setNetworkOnline] = useState<boolean>(
+    typeof navigator !== 'undefined' ? navigator.onLine : true
+  );
+  const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
+  const [syncErrorMessage, setSyncErrorMessage] = useState<string | null>(null);
+  const [syncConflict, setSyncConflict] = useState<SyncConflictInfo | null>(null);
   const [toasts, setToasts] = useState<
     { id: string; message: string; tone: 'success' | 'info' | 'warning' | 'error' }[]
   >([]);
 
   const skipSqlitePushRef = useRef<boolean>(true);
   const hydratedFromSqliteRef = useRef<boolean>(false);
+  const lastSyncedVersionRef = useRef<number | undefined>(undefined);
+  const forceNextOverwriteRef = useRef<boolean>(false);
+  const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const latestStateRef = useRef<PosAppState>(state);
+  latestStateRef.current = state;
+  const networkOnlineRef = useRef<boolean>(networkOnline);
+  networkOnlineRef.current = networkOnline;
+  const syncConflictRef = useRef<SyncConflictInfo | null>(syncConflict);
+  syncConflictRef.current = syncConflict;
 
   const dismissToast = useCallback((id: string) => {
     setToasts((prev) => prev.filter((t) => t.id !== id));
@@ -593,6 +656,69 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     },
     []
   );
+
+  const [aiStockAlerts, setAiStockAlerts] = useState<AiStaffStockAlert[]>(() => {
+    try {
+      const raw = localStorage.getItem('pos_ai_stock_alerts_v1');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) return parsed as AiStaffStockAlert[];
+      }
+    } catch {
+      // ignore localStorage read issues
+    }
+    return [];
+  });
+  const notifiedAlertFingerprintsRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('pos_ai_stock_alerts_v1', JSON.stringify(aiStockAlerts));
+    } catch {
+      // ignore quota errors
+    }
+  }, [aiStockAlerts]);
+
+  const publishAiStockAlerts: PosContextValue['publishAiStockAlerts'] = useCallback(
+    (branchId, alerts, options) => {
+      const showToast = options?.showToast ?? true;
+      const forceToast = options?.forceToast ?? false;
+
+      const freshAlerts = alerts.filter(
+        (a) => forceToast || !notifiedAlertFingerprintsRef.current.has(a.fingerprint)
+      );
+      alerts.forEach((a) => notifiedAlertFingerprintsRef.current.add(a.fingerprint));
+
+      setAiStockAlerts((prev) => {
+        const otherBranches = prev.filter((a) => a.branchId !== branchId);
+        return [...otherBranches, ...alerts];
+      });
+
+      if (showToast && freshAlerts.length > 0) {
+        const hasCritical = freshAlerts.some((a) => a.urgency === 'out' || a.urgency === 'critical');
+        const preview = freshAlerts
+          .slice(0, 2)
+          .map((a) =>
+            a.urgency === 'out'
+              ? `${a.ingredientName} (OUT)`
+              : `${a.ingredientName} (~${a.estimatedDaysRemaining ?? 0}d left)`
+          )
+          .join(', ');
+        const extra = freshAlerts.length > 2 ? ` +${freshAlerts.length - 2} more` : '';
+        notify(
+          `AI Stock Monitor alert for staff: ${preview}${extra}`,
+          hasCritical ? 'warning' : 'info'
+        );
+      }
+
+      return freshAlerts.length;
+    },
+    [notify]
+  );
+
+  const dismissAiStockAlert: PosContextValue['dismissAiStockAlert'] = useCallback((alertId) => {
+    setAiStockAlerts((prev) => prev.filter((a) => a.id !== alertId));
+  }, []);
 
   useEffect(() => {
     try {
@@ -650,24 +776,34 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
           const currentTid = prev.tenantId || activeTenantId;
           const matchedServer = mapped[currentTid];
           if (matchedServer) {
+            const cachedOffline = loadOfflineTenantCache(currentTid);
+            const hasPendingCached = Boolean(
+              cachedOffline?.state.orders.some((o) => o.offlinePendingSync)
+            );
+            lastSyncedVersionRef.current = hasPendingCached
+              ? cachedOffline?.state.version ?? matchedServer.version
+              : matchedServer.version;
             skipSqlitePushRef.current = true;
             setShopId(currentTid);
+
+            const targetBase = hasPendingCached ? cachedOffline!.state : matchedServer;
             return {
-              ...matchedServer,
+              ...targetBase,
               activeStaffId:
                 superFlag
-                  ? matchedServer.staff.find((s) => s.role === 'admin')?.id ||
-                    matchedServer.activeStaffId
+                  ? targetBase.staff.find((s) => s.role === 'admin')?.id ||
+                    targetBase.activeStaffId
                   : prev.activeStaffId &&
-                      matchedServer.staff.some((s) => s.id === prev.activeStaffId)
+                      targetBase.staff.some((s) => s.id === prev.activeStaffId)
                     ? prev.activeStaffId
-                    : matchedServer.activeStaffId,
+                    : targetBase.activeStaffId,
             };
           }
           // Prefer user's owned tenant if logged in
           if (payload.user) {
             const owned = Object.values(mapped).find((t) => t.ownerUid === payload.user?.uid);
             if (owned && owned.tenantId) {
+              lastSyncedVersionRef.current = owned.version;
               skipSqlitePushRef.current = true;
               setActiveTenantId(owned.tenantId);
               setShopId(owned.tenantId);
@@ -679,6 +815,9 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
       }
       hydratedFromSqliteRef.current = true;
       setCloudStatus('synced');
+      setSyncErrorMessage(null);
+      setSyncConflict(null);
+      setLastSyncedAt(new Date().toISOString());
     },
     [activeTenantId]
   );
@@ -687,10 +826,112 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     try {
       const sessionData = await fetchCurrentSession();
       applyServerSessionPayload(sessionData);
-    } catch {
+    } catch (err) {
       setCloudStatus('error');
+      setSyncErrorMessage(
+        err instanceof Error ? err.message : 'Unable to reach the main SQLite server.'
+      );
     }
   }, [applyServerSessionPayload]);
+
+  const performSqliteSyncPush = useCallback(
+    async (
+      snapshot: PosAppState,
+      options?: { forceOverwrite?: boolean; clearPendingOnSuccess?: boolean }
+    ): Promise<boolean> => {
+      const tid = snapshot.tenantId || activeTenantId;
+      const forceOverwrite = Boolean(options?.forceOverwrite || forceNextOverwriteRef.current);
+      forceNextOverwriteRef.current = false;
+
+      const clearPending = options?.clearPendingOnSuccess ?? true;
+      const payloadState: PosAppState = clearPending
+        ? {
+            ...snapshot,
+            offlineMode: false,
+            orders: snapshot.orders.map((o) =>
+              o.offlinePendingSync ? { ...o, offlinePendingSync: false } : o
+            ),
+          }
+        : snapshot;
+
+      const activeStaffMember =
+        payloadState.staff.find((s) => s.id === payloadState.activeStaffId) ||
+        payloadState.staff[0];
+
+      setCloudStatus('syncing');
+
+      try {
+        const saved = await saveTenantToSqlite(payloadState, {
+          staffRole: activeStaffMember?.role,
+          adminPin: activeStaffMember?.role === 'admin' ? activeStaffMember.pin : undefined,
+          expectedVersion: forceOverwrite ? undefined : lastSyncedVersionRef.current,
+          forceOverwrite,
+        });
+
+        lastSyncedVersionRef.current = saved.version;
+        setShopId(saved.tenantId || null);
+        setCloudStatus('synced');
+        setSyncErrorMessage(null);
+        syncConflictRef.current = null;
+        setSyncConflict(null);
+        setLastSyncedAt(new Date().toISOString());
+        clearOfflineTenantCache(saved.tenantId || tid);
+
+        if (clearPending) {
+          setState((prev) => {
+            if ((prev.tenantId || activeTenantId) !== (saved.tenantId || tid)) return prev;
+            const hasPending = prev.orders.some((o) => o.offlinePendingSync) || prev.offlineMode;
+            if (!hasPending && prev.version === saved.version) return prev;
+            skipSqlitePushRef.current = true;
+            return {
+              ...prev,
+              offlineMode: false,
+              version: saved.version,
+              orders: prev.orders.map((o) =>
+                o.offlinePendingSync ? { ...o, offlinePendingSync: false } : o
+              ),
+            };
+          });
+        }
+
+        try {
+          const bc = new BroadcastChannel('xaiwork_pos_sync_v2');
+          bc.postMessage({
+            type: 'state_saved',
+            tenantId: saved.tenantId,
+            tabId: CLIENT_TAB_ID,
+          });
+          bc.close();
+        } catch {
+          // BroadcastChannel optional
+        }
+        return true;
+      } catch (err) {
+        saveOfflineTenantCache(tid, snapshot);
+        setCloudStatus('error');
+        if (err instanceof SyncConflictClientError) {
+          const conflictInfo: SyncConflictInfo = {
+            clientVersion: err.clientVersion,
+            serverVersion: err.serverVersion,
+            serverOrdersCount: err.serverOrdersCount,
+            detectedAt: new Date().toISOString(),
+            message: err.message,
+          };
+          syncConflictRef.current = conflictInfo;
+          setSyncConflict(conflictInfo);
+          setSyncErrorMessage(err.message);
+        } else {
+          syncConflictRef.current = null;
+          setSyncConflict(null);
+          setSyncErrorMessage(
+            err instanceof Error ? err.message : 'Failed to sync changes with main server.'
+          );
+        }
+        return false;
+      }
+    },
+    [activeTenantId]
+  );
 
   // Initial SQLite session + workspace hydration on boot
   useEffect(() => {
@@ -700,10 +941,13 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
         const sessionData = await fetchCurrentSession();
         if (!active) return;
         applyServerSessionPayload(sessionData);
-      } catch {
+      } catch (err) {
         if (!active) return;
         hydratedFromSqliteRef.current = true;
-        setCloudStatus('demo');
+        setCloudStatus('error');
+        setSyncErrorMessage(
+          err instanceof Error ? err.message : 'Main SQLite server unreachable on startup.'
+        );
       } finally {
         if (active) setAuthLoading(false);
       }
@@ -713,45 +957,61 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     };
   }, [applyServerSessionPayload]);
 
+  // Browser online/offline connectivity listener
+  useEffect(() => {
+    const handleOnline = () => {
+      setNetworkOnline(true);
+      networkOnlineRef.current = true;
+      if (!latestStateRef.current.offlineMode && !syncConflictRef.current) {
+        const snapshot = latestStateRef.current;
+        saveQueueRef.current = saveQueueRef.current.then(() =>
+          performSqliteSyncPush(snapshot, { clearPendingOnSuccess: true }).then(() => undefined)
+        );
+      }
+    };
+    const handleOffline = () => {
+      setNetworkOnline(false);
+      networkOnlineRef.current = false;
+      const tid = latestStateRef.current.tenantId || activeTenantId;
+      saveOfflineTenantCache(tid, latestStateRef.current);
+      notify('Network connection lost — offline transactions will queue locally.', 'warning');
+    };
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, [activeTenantId, notify, performSqliteSyncPush]);
+
   // Debounced Atomic SQLite Persistence whenever active tenant state mutates
   useEffect(() => {
     if (!hydratedFromSqliteRef.current) return;
+    const tid = state.tenantId || activeTenantId;
+
+    if (state.offlineMode || !networkOnline || syncConflict) {
+      saveOfflineTenantCache(tid, state);
+      return;
+    }
+
     if (skipSqlitePushRef.current) {
       skipSqlitePushRef.current = false;
       return;
     }
-    if (state.offlineMode) return;
 
-    const activeStaffMember =
-      state.staff.find((s) => s.id === state.activeStaffId) || state.staff[0];
     const timer = setTimeout(() => {
-      setCloudStatus('syncing');
-      saveTenantToSqlite(state, {
-        staffRole: activeStaffMember?.role,
-        adminPin: activeStaffMember?.role === 'admin' ? activeStaffMember.pin : undefined,
-      })
-        .then((saved) => {
-          setShopId(saved.tenantId || null);
-          setCloudStatus('synced');
-          try {
-            const bc = new BroadcastChannel('xaiwork_pos_sync_v2');
-            bc.postMessage({
-              type: 'state_saved',
-              tenantId: saved.tenantId,
-              tabId: CLIENT_TAB_ID,
-            });
-            bc.close();
-          } catch {
-            // BroadcastChannel optional
-          }
-        })
-        .catch(() => {
-          setCloudStatus('error');
-        });
+      saveQueueRef.current = saveQueueRef.current.then(async () => {
+        const currentSnapshot = latestStateRef.current;
+        if (currentSnapshot.offlineMode || !networkOnlineRef.current || syncConflictRef.current) {
+          saveOfflineTenantCache(currentSnapshot.tenantId || activeTenantId, currentSnapshot);
+          return;
+        }
+        await performSqliteSyncPush(currentSnapshot, { clearPendingOnSuccess: true });
+      });
     }, 260);
 
     return () => clearTimeout(timer);
-  }, [state]);
+  }, [state, activeTenantId, networkOnline, syncConflict, performSqliteSyncPush]);
 
   // Live Real-Time SSE + Cross-Tab Sync
   useEffect(() => {
@@ -770,6 +1030,13 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
               .then((fresh) => {
                 const normalized = normalizeTenantRbac(fresh);
                 setRawTenantStates((prev) => ({ ...prev, [evt.tenantId!]: normalized }));
+                if (
+                  latestStateRef.current.offlineMode ||
+                  latestStateRef.current.orders.some((o) => o.offlinePendingSync)
+                ) {
+                  return;
+                }
+                lastSyncedVersionRef.current = normalized.version;
                 setState((prev) => {
                   if ((prev.tenantId || activeTenantId) !== evt.tenantId) return prev;
                   skipSqlitePushRef.current = true;
@@ -778,6 +1045,10 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
                     activeStaffId: prev.activeStaffId || normalized.activeStaffId,
                   };
                 });
+                setCloudStatus('synced');
+                setSyncErrorMessage(null);
+                setSyncConflict(null);
+                setLastSyncedAt(new Date().toISOString());
                 if (evt.type === 'qr_order_received') {
                   notify('New Guest QR order arrived!', 'info');
                 } else if (evt.type === 'reservation_received') {
@@ -803,6 +1074,13 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
             .then((fresh) => {
               const normalized = normalizeTenantRbac(fresh);
               setRawTenantStates((prev) => ({ ...prev, [e.data.tenantId]: normalized }));
+              if (
+                latestStateRef.current.offlineMode ||
+                latestStateRef.current.orders.some((o) => o.offlinePendingSync)
+              ) {
+                return;
+              }
+              lastSyncedVersionRef.current = normalized.version;
               setState((prev) => {
                 if ((prev.tenantId || activeTenantId) !== e.data.tenantId) return prev;
                 skipSqlitePushRef.current = true;
@@ -1148,10 +1426,13 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
         : normalized;
     const nextActor =
       nextState.staff.find((s) => s.id === nextState.activeStaffId) || nextState.staff[0];
+    lastSyncedVersionRef.current = nextState.version;
     skipSqlitePushRef.current = true;
     setActiveTenantId(tenantId);
     setState(nextState);
     setShopId(tenantId);
+    setSyncErrorMessage(null);
+    setSyncConflict(null);
     setSelectedTableId(null);
     setActiveOrderId(null);
     if (!hasPermission(nextActor, navSection, nextState.ownerPermissions)) {
@@ -1319,6 +1600,7 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
       cashierName: activeStaff.name,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
+      offlinePendingSync: state.offlineMode || !networkOnlineRef.current,
     };
 
     setState((prev) => {
@@ -1340,7 +1622,13 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
       return {
         ...prev,
         nextOrderNumber: prev.nextOrderNumber + 1,
-        orders: [newOrder, ...prev.orders],
+        orders: [
+          {
+            ...newOrder,
+            offlinePendingSync: prev.offlineMode || !networkOnlineRef.current,
+          },
+          ...prev.orders,
+        ],
         tables: updatedTables,
         displayActiveOrderId: newOrderId,
       };
@@ -1383,13 +1671,20 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
       cashierName: activeStaff.name,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
+      offlinePendingSync: state.offlineMode || !networkOnlineRef.current,
     };
     setState((prev) => {
       syncOrderCloud(newOrder, prev.offlineMode);
       return {
         ...prev,
         nextOrderNumber: prev.nextOrderNumber + 1,
-        orders: [newOrder, ...prev.orders],
+        orders: [
+          {
+            ...newOrder,
+            offlinePendingSync: prev.offlineMode || !networkOnlineRef.current,
+          },
+          ...prev.orders,
+        ],
         displayActiveOrderId: newOrderId,
       };
     });
@@ -1442,7 +1737,14 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
           };
           nextItems = [...ord.items, newLine];
         }
-        const updated = recomputeOrderTotals({ ...ord, items: nextItems }, branch);
+        const updated = recomputeOrderTotals(
+          {
+            ...ord,
+            items: nextItems,
+            offlinePendingSync: ord.offlinePendingSync || prev.offlineMode || !networkOnlineRef.current,
+          },
+          branch
+        );
         syncOrderCloud(updated, prev.offlineMode);
         return updated;
       });
@@ -1458,7 +1760,14 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
         const nextItems = ord.items
           .map((l) => (l.id === lineId ? { ...l, qty: l.qty + delta } : l))
           .filter((l) => l.qty > 0);
-        const updated = recomputeOrderTotals({ ...ord, items: nextItems }, branch);
+        const updated = recomputeOrderTotals(
+          {
+            ...ord,
+            items: nextItems,
+            offlinePendingSync: ord.offlinePendingSync || prev.offlineMode || !networkOnlineRef.current,
+          },
+          branch
+        );
         syncOrderCloud(updated, prev.offlineMode);
         return updated;
       });
@@ -1559,6 +1868,7 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
               totalKhr: 0,
               updatedAt: nowIso,
               closedAt: nowIso,
+              offlinePendingSync: o.offlinePendingSync || prev.offlineMode || !networkOnlineRef.current,
             }
           : o
       );
@@ -1595,6 +1905,7 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
   };
 
   const sendOrderToKitchen = (orderId: string) => {
+    const nowIso = new Date().toISOString();
     setState((prev) => {
       const orders = prev.orders.map((ord) => {
         if (ord.id !== orderId) return ord;
@@ -1610,7 +1921,9 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
           status: ord.status === 'open' ? 'sent' : ord.status,
           currentRound: ord.currentRound + 1,
           items: nextItems,
-          updatedAt: new Date().toISOString(),
+          kdsSubmittedAt: ord.kdsSubmittedAt || nowIso,
+          updatedAt: nowIso,
+          offlinePendingSync: ord.offlinePendingSync || prev.offlineMode || !networkOnlineRef.current,
         };
         syncOrderCloud(updated, prev.offlineMode);
         return updated;
@@ -1620,6 +1933,7 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
   };
 
   const advanceKdsOrder = (orderId: string, nextStatus: 'cooking' | 'ready' | 'served') => {
+    const nowIso = new Date().toISOString();
     setState((prev) => {
       const targetOrder = prev.orders.find((o) => o.id === orderId);
       const orders = prev.orders.map((ord) => {
@@ -1628,11 +1942,19 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
           if (!l.sentToKitchen || l.voided) return l;
           return { ...l, kdsStatus: nextStatus };
         });
+        const kdsCompletedAt =
+          nextStatus === 'ready'
+            ? nowIso
+            : nextStatus === 'served'
+              ? ord.kdsCompletedAt || nowIso
+              : ord.kdsCompletedAt;
         const updated: PosOrder = {
           ...ord,
           status: ord.status === 'paid' ? 'paid' : nextStatus,
           items: nextItems,
-          updatedAt: new Date().toISOString(),
+          kdsSubmittedAt: ord.kdsSubmittedAt || ord.createdAt,
+          kdsCompletedAt,
+          updatedAt: nowIso,
         };
         syncOrderCloud(updated, prev.offlineMode);
         return updated;
@@ -1808,24 +2130,122 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
   };
 
   const attachMemberToOrder = (orderId: string, phone: string, redeemPoints: number) => {
-    const cleanPhone = phone.replace(/\s+/g, '');
+    const cleanPhone = normalizeCustomerPhone(phone);
     setState((prev) => {
       const branch = prev.branches.find((b) => b.id === prev.activeBranchId) || prev.branches[0];
-      const member = prev.members.find((m) => m.phone.replace(/\s+/g, '') === cleanPhone);
-      const safeRedeem = member ? Math.min(member.points, Math.max(0, redeemPoints)) : 0;
-      const orders = prev.orders.map((o) =>
-        o.id === orderId
-          ? recomputeOrderTotals(
-              {
-                ...o,
-                memberId: member?.id,
-                memberPhone: cleanPhone,
-                pointsRedeemed: safeRedeem,
-              },
-              branch
-            )
-          : o
+      const member = findMemberByPhone(prev.members, cleanPhone);
+      const orders = prev.orders.map((o) => {
+        if (o.id !== orderId) return o;
+        if (!cleanPhone) {
+          let strippedItems = [...o.items];
+          for (const line of o.items) {
+            if (line.redeemedByLoyalty) {
+              strippedItems = removeLoyaltyRewardLine(strippedItems, line.id);
+            }
+          }
+          return recomputeOrderTotals(
+            {
+              ...o,
+              items: strippedItems,
+              memberId: undefined,
+              memberPhone: undefined,
+              pointsRedeemed: 0,
+              loyaltyItemPointsRedeemed: 0,
+            },
+            branch
+          );
+        }
+        const usedForItems = getOrderLoyaltyItemPointsUsed(o.items);
+        const availableForDiscount = member ? Math.max(0, member.points - usedForItems) : 0;
+        const safeRedeem = member ? Math.min(availableForDiscount, Math.max(0, redeemPoints)) : 0;
+        return recomputeOrderTotals(
+          {
+            ...o,
+            memberId: member?.id,
+            memberPhone: member ? normalizeCustomerPhone(member.phone) : cleanPhone,
+            pointsRedeemed: safeRedeem,
+          },
+          branch
+        );
+      });
+      return { ...prev, orders };
+    });
+  };
+
+  const redeemLoyaltyItem = (orderId: string, rewardId: string): boolean => {
+    const targetOrder = state.orders.find((o) => o.id === orderId);
+    if (!targetOrder || targetOrder.status === 'paid' || targetOrder.status === 'voided') {
+      return false;
+    }
+    if (!activeBranch.pointsEnabled) {
+      notify('Loyalty points are paused on this branch.', 'warning');
+      return false;
+    }
+    const member = findMemberByPhone(state.members, targetOrder.memberPhone);
+    if (!member) {
+      notify('Attach a loyalty member first before redeeming a free item.', 'warning');
+      return false;
+    }
+    const reward = (state.loyaltyRewards || []).find((r) => r.id === rewardId && r.active);
+    if (!reward) {
+      notify('Loyalty reward is no longer active.', 'warning');
+      return false;
+    }
+    const usedOnItems = getOrderLoyaltyItemPointsUsed(targetOrder.items);
+    const remainingPts = member.points - usedOnItems - (targetOrder.pointsRedeemed || 0);
+    if (remainingPts < reward.pointsCost) {
+      notify(
+        `${member.name} needs ${reward.pointsCost} pts (${Math.max(0, remainingPts)} available).`,
+        'warning'
       );
+      return false;
+    }
+    const menuItem = state.menuItems.find((m) => m.id === reward.menuItemId && m.active);
+    if (!menuItem && !targetOrder.items.some((i) => !i.voided && i.menuItemId === reward.menuItemId)) {
+      notify(`${reward.menuItemName} is not currently available on the menu.`, 'warning');
+      return false;
+    }
+
+    setState((prev) => {
+      const branch = prev.branches.find((b) => b.id === prev.activeBranchId) || prev.branches[0];
+      const orders = prev.orders.map((o) => {
+        if (o.id !== orderId) return o;
+        const nextItems = applyLoyaltyRewardToOrderItems({
+          items: o.items,
+          reward,
+          menuItem,
+          currentRound: o.currentRound,
+        });
+        return recomputeOrderTotals(
+          {
+            ...o,
+            items: nextItems,
+            loyaltyItemPointsRedeemed: getOrderLoyaltyItemPointsUsed(nextItems),
+          },
+          branch
+        );
+      });
+      return { ...prev, orders };
+    });
+    notify(`Redeemed ${reward.name} (-${reward.pointsCost} pts) on Bill #${targetOrder.orderNumber}`, 'success');
+    return true;
+  };
+
+  const removeRedeemedLoyaltyItem = (orderId: string, lineId: string) => {
+    setState((prev) => {
+      const branch = prev.branches.find((b) => b.id === prev.activeBranchId) || prev.branches[0];
+      const orders = prev.orders.map((o) => {
+        if (o.id !== orderId) return o;
+        const nextItems = removeLoyaltyRewardLine(o.items, lineId);
+        return recomputeOrderTotals(
+          {
+            ...o,
+            items: nextItems,
+            loyaltyItemPointsRedeemed: getOrderLoyaltyItemPointsUsed(nextItems),
+          },
+          branch
+        );
+      });
       return { ...prev, orders };
     });
   };
@@ -1840,7 +2260,7 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
         if (o.id !== orderId) return o;
         let usedOne = false;
         const nextItems = o.items.map((item) => {
-          if (!usedOne && !item.voided && tpl?.categories.includes(item.category)) {
+          if (!usedOne && !item.voided && !item.redeemedByLoyalty && tpl?.categories.includes(item.category)) {
             usedOne = true;
             return { ...item, coveredByPack: true };
           }
@@ -1854,8 +2274,25 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
 
   const settleOrderPayment: PosContextValue['settleOrderPayment'] = (orderId, params) => {
     const currentOrder = state.orders.find((o) => o.id === orderId);
-    if (!currentOrder) return;
+    if (!currentOrder || currentOrder.status === 'paid' || currentOrder.status === 'voided') return;
     const nowIso = new Date().toISOString();
+    const resolvedTotalUsd =
+      typeof params.totalUsd === 'number' ? params.totalUsd : currentOrder.totalUsd;
+    const resolvedTotalKhr =
+      typeof params.totalKhr === 'number' ? params.totalKhr : currentOrder.totalKhr;
+
+    const matchedMember = findMemberByPhone(state.members, currentOrder.memberPhone);
+    const loyaltyPreview = matchedMember
+      ? settleMemberLoyalty({
+          member: matchedMember,
+          order: currentOrder,
+          totalPaidUsd: resolvedTotalUsd,
+          branch: activeBranch,
+          offlineMode: state.offlineMode,
+          nowIso,
+        })
+      : null;
+
     const updatedOrder: PosOrder = {
       ...currentOrder,
       status: 'paid',
@@ -1866,15 +2303,27 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
           ? params.promoDiscountUsd
           : currentOrder.promoDiscountUsd,
       appliedPromoName: params.appliedPromoName ?? currentOrder.appliedPromoName,
-      totalUsd: typeof params.totalUsd === 'number' ? params.totalUsd : currentOrder.totalUsd,
-      totalKhr: typeof params.totalKhr === 'number' ? params.totalKhr : currentOrder.totalKhr,
+      totalUsd: resolvedTotalUsd,
+      totalKhr: resolvedTotalKhr,
       paidUsd: params.paidUsd,
       paidKhr: params.paidKhr,
       changeUsd: params.changeUsd,
       changeKhr: params.changeKhr,
+      memberId: matchedMember?.id ?? currentOrder.memberId,
+      memberPhone: matchedMember
+        ? normalizeCustomerPhone(matchedMember.phone)
+        : currentOrder.memberPhone,
+      pointsRedeemed: loyaltyPreview
+        ? loyaltyPreview.discountPointsUsed
+        : currentOrder.pointsRedeemed,
+      loyaltyItemPointsRedeemed: loyaltyPreview
+        ? loyaltyPreview.itemPointsUsed
+        : getOrderLoyaltyItemPointsUsed(currentOrder.items),
+      loyaltyPointsEarned: loyaltyPreview?.earnedPoints ?? 0,
+      loyaltyPointsBalanceAfter: loyaltyPreview?.balanceAfter,
       closedAt: nowIso,
       updatedAt: nowIso,
-      offlinePendingSync: state.offlineMode,
+      offlinePendingSync: state.offlineMode || !networkOnlineRef.current,
       items: currentOrder.items.map((l) => ({
         ...l,
         sentToKitchen: true,
@@ -1886,7 +2335,7 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     setState((prev) => {
       const branch = prev.branches.find((b) => b.id === prev.activeBranchId) || prev.branches[0];
       const ord = prev.orders.find((o) => o.id === orderId);
-      if (!ord) return prev;
+      if (!ord || ord.status === 'paid' || ord.status === 'voided') return prev;
 
       // Free table if dine-in
       const tables = prev.tables.map((t) => {
@@ -1934,15 +2383,20 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
         p.id === ord.prepaidCustomerPackId ? { ...p, usesLeft: Math.max(0, p.usesLeft - 1) } : p
       );
 
-      // Update member points (no points if offline)
+      // Update member loyalty points, tier, total spend, and points activity history
+      const targetPhone = normalizeCustomerPhone(ord.memberPhone);
       const members = prev.members.map((m) => {
-        if (prev.offlineMode || !ord.memberPhone || m.phone !== ord.memberPhone) return m;
-        const earned = Math.floor(updatedOrder.totalUsd * branch.pointsPerDollar);
-        const nextPoints = Math.max(0, m.points - ord.pointsRedeemed + earned);
-        const nextSpent = roundCurrency(m.totalSpentUsd + updatedOrder.totalUsd);
-        const tier: 'Member' | 'Silver' | 'Gold' =
-          nextSpent >= 500 ? 'Gold' : nextSpent >= 100 ? 'Silver' : 'Member';
-        return { ...m, points: nextPoints, totalSpentUsd: nextSpent, tier, lastVisit: nowIso.slice(0, 10) };
+        if (prev.offlineMode || !targetPhone || normalizeCustomerPhone(m.phone) !== targetPhone) {
+          return m;
+        }
+        return settleMemberLoyalty({
+          member: m,
+          order: ord,
+          totalPaidUsd: updatedOrder.totalUsd,
+          branch,
+          offlineMode: prev.offlineMode,
+          nowIso,
+        }).updatedMember;
       });
 
       // Issue VAT invoice
@@ -2097,6 +2551,8 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
           changeUsd: 0,
           changeKhr: 0,
           cashierName: 'QR Self-Order',
+          sourceQrId: qrItem.id,
+          kdsSubmittedAt: new Date().toISOString(),
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
         },
@@ -2185,6 +2641,8 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
             changeUsd: 0,
             changeKhr: 0,
             cashierName: 'QR Approved',
+            sourceQrId: qr.id,
+            kdsSubmittedAt: new Date().toISOString(),
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString(),
           },
@@ -2798,22 +3256,40 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     phone,
     initialPoints = 0,
   }) => {
-    const cleanPhone = phone.replace(/\s+/g, '').trim();
+    const cleanPhone = normalizeCustomerPhone(phone);
     const cleanName = name.trim();
     if (!cleanPhone || !cleanName) return null;
-    const existing = state.members.find((m) => m.phone === cleanPhone);
+    const existing = findMemberByPhone(state.members, cleanPhone);
     if (existing) {
       notify(`Member ${existing.name} (${cleanPhone}) is already enrolled.`, 'info');
       return existing;
     }
+    const startPts = Math.max(0, Math.round(initialPoints));
+    const memberId = `mem_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`;
+    const nowIso = new Date().toISOString();
+    const initialHistory: LoyaltyTransaction[] =
+      startPts > 0
+        ? [
+            {
+              id: `ltx_enroll_${Date.now()}`,
+              memberId,
+              type: 'bonus',
+              pointsDelta: startPts,
+              balanceAfter: startPts,
+              description: 'Enrollment welcome points',
+              createdAt: nowIso,
+            },
+          ]
+        : [];
     const newMember: LoyaltyMember = {
-      id: `mem_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
+      id: memberId,
       name: cleanName,
       phone: cleanPhone,
-      points: Math.max(0, Math.round(initialPoints)),
+      points: startPts,
       totalSpentUsd: 0,
       tier: 'Member',
-      lastVisit: new Date().toISOString().slice(0, 10),
+      lastVisit: nowIso.slice(0, 10),
+      loyaltyHistory: initialHistory,
     };
     setState((prev) => ({
       ...prev,
@@ -2821,6 +3297,102 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     }));
     notify(`Enrolled loyalty member ${cleanName}!`, 'success');
     return newMember;
+  };
+
+  const adjustMemberPoints: PosContextValue['adjustMemberPoints'] = (
+    memberId,
+    delta,
+    reason
+  ) => {
+    if (!hasCurrentPermission('promotion') && !canEditSettings(activeStaff, state.ownerPermissions)) {
+      notify('Permission required to adjust member points.', 'warning');
+      return false;
+    }
+    const cleanDelta = Math.round(delta);
+    if (!cleanDelta) return false;
+    const nowIso = new Date().toISOString();
+    setState((prev) => ({
+      ...prev,
+      members: prev.members.map((m) => {
+        if (m.id !== memberId) return m;
+        const nextBalance = Math.max(0, m.points + cleanDelta);
+        const appliedDelta = nextBalance - m.points;
+        const tx: LoyaltyTransaction = {
+          id: `ltx_adj_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
+          memberId: m.id,
+          type: appliedDelta >= 0 ? 'bonus' : 'adjust',
+          pointsDelta: appliedDelta,
+          balanceAfter: nextBalance,
+          description: reason.trim() || (appliedDelta >= 0 ? 'Manual bonus' : 'Manual adjustment'),
+          createdAt: nowIso,
+        };
+        return {
+          ...m,
+          points: nextBalance,
+          loyaltyHistory: [tx, ...(m.loyaltyHistory || [])].slice(0, 100),
+        };
+      }),
+    }));
+    notify(
+      `${cleanDelta >= 0 ? 'Added' : 'Deducted'} ${Math.abs(cleanDelta)} pts.`,
+      'success'
+    );
+    return true;
+  };
+
+  const saveLoyaltyReward: PosContextValue['saveLoyaltyReward'] = (reward) => {
+    const cleanName = reward.name.trim();
+    const cost = Math.max(10, Math.round(reward.pointsCost));
+    if (!cleanName || !reward.menuItemId) return;
+    setState((prev) => {
+      const existingList = prev.loyaltyRewards || [];
+      if (reward.id) {
+        return {
+          ...prev,
+          loyaltyRewards: existingList.map((r) =>
+            r.id === reward.id ? { ...r, ...reward, name: cleanName, pointsCost: cost } : r
+          ),
+        };
+      }
+      const created: LoyaltyReward = {
+        id: `loy_rew_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
+        branchId: prev.activeBranchId,
+        name: cleanName,
+        menuItemId: reward.menuItemId,
+        menuItemName: reward.menuItemName,
+        pointsCost: cost,
+        active: reward.active,
+      };
+      return {
+        ...prev,
+        loyaltyRewards: [created, ...existingList],
+      };
+    });
+    notify(`Saved loyalty reward "${cleanName}" (${cost} pts).`, 'success');
+  };
+
+  const toggleLoyaltyReward = (rewardId: string) => {
+    setState((prev) => ({
+      ...prev,
+      loyaltyRewards: (prev.loyaltyRewards || []).map((r) =>
+        r.id === rewardId ? { ...r, active: !r.active } : r
+      ),
+    }));
+  };
+
+  const updateLoyaltyRules: PosContextValue['updateLoyaltyRules'] = (partial) => {
+    if (!hasCurrentPermission('promotion') && !canEditSettings(activeStaff, state.ownerPermissions)) {
+      notify('Permission required to update loyalty rules.', 'warning');
+      return false;
+    }
+    setState((prev) => ({
+      ...prev,
+      branches: prev.branches.map((b) =>
+        b.id === prev.activeBranchId ? { ...b, ...partial } : b
+      ),
+    }));
+    notify('Saved loyalty earn & redemption rules.', 'success');
+    return true;
   };
 
   const toggleTenantFeatureFlag = (moduleKey: string, enabled: boolean) => {
@@ -3311,9 +3883,14 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
         branches: [...prev.branches, newBranch],
         activeBranchId: newBranchId,
       };
-      return cloneFromCurrent
+      const branched = cloneFromCurrent
         ? cloneBranchResources(withBranch, prev.activeBranchId, newBranchId)
         : withBranch;
+      const defaultRewards = createDefaultLoyaltyRewards(newBranchId, branched.menuItems);
+      return {
+        ...branched,
+        loyaltyRewards: [...(branched.loyaltyRewards || []), ...defaultRewards],
+      };
     });
     setSelectedTableId(null);
     setActiveOrderId(null);
@@ -3373,26 +3950,82 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     }
   };
 
-  const toggleOfflineMode = () => {
-    setState((prev) => {
-      const nextOffline = !prev.offlineMode;
-      notify(
-        nextOffline
-          ? 'Switched to Offline Queue mode (local cache active)'
-          : 'Back online — syncing queued bills to SQLite',
-        nextOffline ? 'warning' : 'success'
-      );
-      return { ...prev, offlineMode: nextOffline };
+  const retrySyncNow = async (options?: { forceOverwrite?: boolean }): Promise<boolean> => {
+    if (!networkOnlineRef.current) {
+      notify('Device network is still offline. Connect to Wi-Fi/internet and retry.', 'warning');
+      return false;
+    }
+    let ok = false;
+    const snapshot = latestStateRef.current;
+    saveQueueRef.current = saveQueueRef.current.then(async () => {
+      ok = await performSqliteSyncPush(snapshot, {
+        forceOverwrite: Boolean(options?.forceOverwrite),
+        clearPendingOnSuccess: true,
+      });
     });
+    await saveQueueRef.current;
+    if (ok) {
+      notify(
+        options?.forceOverwrite
+          ? 'Local transactions force-pushed to main server!'
+          : 'All pending transactions synced with main server!',
+        'success'
+      );
+    } else if (syncConflictRef.current) {
+      notify('Sync conflict detected — choose Keep Local & Push or Pull Server Version.', 'error');
+    } else {
+      notify('Sync failed with main server. Pending transactions remain cached locally.', 'error');
+    }
+    return ok;
+  };
+
+  const resolveConflictUseServer = async (): Promise<boolean> => {
+    const tid = latestStateRef.current.tenantId || activeTenantId;
+    try {
+      setCloudStatus('syncing');
+      const fresh = await fetchTenantFromSqlite(tid);
+      const normalized = normalizeTenantRbac(fresh);
+      lastSyncedVersionRef.current = normalized.version;
+      skipSqlitePushRef.current = true;
+      setRawTenantStates((prev) => ({ ...prev, [tid]: normalized }));
+      setState((prev) => ({
+        ...normalized,
+        offlineMode: false,
+        activeStaffId: prev.activeStaffId || normalized.activeStaffId,
+      }));
+      clearOfflineTenantCache(tid);
+      setCloudStatus('synced');
+      setSyncErrorMessage(null);
+      setSyncConflict(null);
+      setLastSyncedAt(new Date().toISOString());
+      notify(`Loaded latest main server state (v${normalized.version ?? 1}).`, 'success');
+      return true;
+    } catch (err) {
+      setCloudStatus('error');
+      setSyncErrorMessage(
+        err instanceof Error ? err.message : 'Unable to fetch server version.'
+      );
+      notify('Could not pull server state — check server connection.', 'error');
+      return false;
+    }
+  };
+
+  const toggleOfflineMode = () => {
+    const currentlyOffline = latestStateRef.current.offlineMode;
+    if (!currentlyOffline) {
+      setState((prev) => {
+        const next = { ...prev, offlineMode: true };
+        saveOfflineTenantCache(prev.tenantId || activeTenantId, next);
+        return next;
+      });
+      notify('Switched to Offline Queue mode (local cache active)', 'warning');
+      return;
+    }
+    void retrySyncNow();
   };
 
   const syncOfflineBills = () => {
-    setState((prev) => ({
-      ...prev,
-      offlineMode: false,
-      orders: prev.orders.map((o) => ({ ...o, offlinePendingSync: false })),
-    }));
-    notify('All queued bills synced to SQLite!', 'success');
+    void retrySyncNow();
   };
 
   const setDisplayOrder = useCallback((orderId: string | null, showKhqr: boolean) => {
@@ -3412,6 +4045,10 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     }
     if (!state.isDemoTenant) return;
     const fresh = createSeedState('restaurant');
+    forceNextOverwriteRef.current = true;
+    clearOfflineTenantCache(fresh.tenantId || 'tenant_lotus_bkk1');
+    setSyncErrorMessage(null);
+    setSyncConflict(null);
     setState(fresh);
     setActiveTenantId(fresh.tenantId || 'tenant_lotus_bkk1');
     setSelectedTableId(null);
@@ -4133,6 +4770,12 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     authLoading,
     cloudStatus,
     sseConnected,
+    networkOnline,
+    lastSyncedAt,
+    syncErrorMessage,
+    syncConflict,
+    retrySyncNow,
+    resolveConflictUseServer,
     loginWithEmailPassword,
     registerWithEmailPassword,
     resetSaasPassword,
@@ -4141,10 +4784,17 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     toasts,
     notify,
     dismissToast,
+    aiStockAlerts,
+    publishAiStockAlerts,
+    dismissAiStockAlert,
     setOrderGuests,
     cancelEmptyOrder,
     voidOrder,
     addLoyaltyMember,
+    adjustMemberPoints,
+    saveLoyaltyReward,
+    toggleLoyaltyReward,
+    updateLoyaltyRules,
     toggleTenantFeatureFlag,
     reloadTenantsFromSqlite,
     selectedTableId,
@@ -4172,6 +4822,8 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     applyOrderDiscount,
     setOrderPromoCode,
     attachMemberToOrder,
+    redeemLoyaltyItem,
+    removeRedeemedLoyaltyItem,
     applyPrepaidPack,
     settleOrderPayment,
     submitGuestQrOrder,

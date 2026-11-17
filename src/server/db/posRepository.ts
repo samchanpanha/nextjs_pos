@@ -60,6 +60,28 @@ export interface AuthenticatedContext {
   isSuperAdmin: boolean;
 }
 
+export class SyncConflictError extends Error {
+  readonly code = 'SYNC_CONFLICT' as const;
+  readonly status = 409;
+  readonly clientVersion: number;
+  readonly serverVersion: number;
+  readonly serverOrdersCount: number;
+
+  constructor(params: {
+    clientVersion: number;
+    serverVersion: number;
+    serverOrdersCount: number;
+  }) {
+    super(
+      `Sync conflict: main server is at version v${params.serverVersion} while this terminal synced from v${params.clientVersion}.`
+    );
+    this.name = 'SyncConflictError';
+    this.clientVersion = params.clientVersion;
+    this.serverVersion = params.serverVersion;
+    this.serverOrdersCount = params.serverOrdersCount;
+  }
+}
+
 export class PosSqliteRepository {
   private conn: SqliteConnection;
 
@@ -963,6 +985,8 @@ export class PosSqliteRepository {
     options?: {
       auth?: AuthenticatedContext;
       bypassSecurityControls?: boolean;
+      expectedVersion?: number;
+      forceOverwrite?: boolean;
     }
   ): PosAppState {
     const isSuperAdmin = Boolean(
@@ -980,6 +1004,25 @@ export class PosSqliteRepository {
            FROM tenants WHERE id = ?`
         )
         .get(tenantId) as Record<string, unknown> | undefined;
+
+      if (
+        existingRow &&
+        typeof options?.expectedVersion === 'number' &&
+        Number.isFinite(options.expectedVersion) &&
+        !options.forceOverwrite
+      ) {
+        const serverVersion = Number(existingRow.version ?? 1);
+        if (serverVersion !== options.expectedVersion) {
+          const orderCountRow = this.db
+            .prepare('SELECT COUNT(*) as cnt FROM orders WHERE tenant_id = ?')
+            .get(tenantId) as { cnt?: number } | undefined;
+          throw new SyncConflictError({
+            clientVersion: options.expectedVersion,
+            serverVersion,
+            serverOrdersCount: Number(orderCountRow?.cnt ?? 0),
+          });
+        }
+      }
 
       // Ensure unique businessCode across tenants
       const cleanBusinessCode = incoming.businessCode

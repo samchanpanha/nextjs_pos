@@ -15,6 +15,10 @@ export interface OrderLineItem {
   kdsStatus: 'draft' | 'new' | 'cooking' | 'ready' | 'served';
   voided?: boolean;
   coveredByPack?: boolean;
+  redeemedByLoyalty?: boolean;
+  loyaltyRewardId?: string;
+  loyaltyRewardName?: string;
+  loyaltyPointsCost?: number;
   orderedBy?: string;
 }
 
@@ -94,7 +98,7 @@ export function calculateOrderTotals(input: OrderTotalsInput): OrderTotalsResult
   const activeItems = input.items.filter((i) => !i.voided);
   const subtotalUsd = roundCurrency(
     activeItems.reduce((sum, item) => {
-      if (item.coveredByPack) return sum;
+      if (item.coveredByPack || item.redeemedByLoyalty) return sum;
       return sum + item.unitPriceUsd * item.qty;
     }, 0)
   );
@@ -188,7 +192,7 @@ export function evaluateBestPromotion(
   currentHour: number,
   enteredCode?: string
 ): { promotion: PromotionRule | null; discountUsd: number } {
-  const activeItems = items.filter((i) => !i.voided && !i.coveredByPack);
+  const activeItems = items.filter((i) => !i.voided && !i.coveredByPack && !i.redeemedByLoyalty);
   const subtotal = activeItems.reduce((s, i) => s + i.unitPriceUsd * i.qty, 0);
   if (subtotal <= 0) return { promotion: null, discountUsd: 0 };
 

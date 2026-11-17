@@ -1,6 +1,7 @@
-import { useState } from 'react';
-import { Volume2, VolumeX, ArrowLeft, ChefHat } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import { Volume2, VolumeX, ArrowLeft, ChefHat, Timer, Gauge, CheckCircle2, Clock } from 'lucide-react';
 import { usePos } from '../context/PosContext';
+import { calculateKdsPrepMetrics } from '../utils/kdsMetrics';
 
 interface KdsViewProps {
   standalone?: boolean;
@@ -10,9 +11,34 @@ export function KdsView({ standalone = false }: KdsViewProps) {
   const { state, activeBranch, advanceKdsOrder, setExternalMode } = usePos();
   const [stationFilter, setStationFilter] = useState<'all' | 'kitchen' | 'bar'>('all');
   const [chimeOn, setChimeOn] = useState(true);
+  const [nowMs, setNowMs] = useState<number>(() => Date.now());
 
-  const activeKdsOrders = state.orders.filter((o) => {
-    if (o.branchId !== activeBranch.id) return false;
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setNowMs(Date.now());
+    }, 15000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const branchOrders = useMemo(
+    () => state.orders.filter((o) => o.branchId === activeBranch.id),
+    [state.orders, activeBranch.id]
+  );
+
+  const prepMetrics = useMemo(
+    () =>
+      calculateKdsPrepMetrics({
+        orders: branchOrders,
+        branchId: activeBranch.id,
+        stationFilter,
+        warnMinutes: activeBranch.kdsWarnMinutes,
+        lateMinutes: activeBranch.kdsLateMinutes,
+        nowMs,
+      }),
+    [branchOrders, activeBranch.id, stationFilter, activeBranch.kdsWarnMinutes, activeBranch.kdsLateMinutes, nowMs]
+  );
+
+  const activeKdsOrders = branchOrders.filter((o) => {
     if (o.status === 'paid' || o.status === 'voided' || o.status === 'served') return false;
     const sent = o.items.filter((i) => i.sentToKitchen && !i.voided);
     if (sent.length === 0) return false;
@@ -41,6 +67,24 @@ export function KdsView({ standalone = false }: KdsViewProps) {
     o.items.some((i) => i.sentToKitchen && !i.voided && i.station === 'bar')
   ).length;
 
+  const slaBadgeStyle =
+    prepMetrics.slaHealth === 'fast'
+      ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+      : prepMetrics.slaHealth === 'warning'
+        ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+        : prepMetrics.slaHealth === 'slow'
+          ? 'bg-red-500/15 text-red-300 border-red-500/30'
+          : 'bg-slate-800 text-slate-400 border-slate-700';
+
+  const slaBadgeLabel =
+    prepMetrics.slaHealth === 'fast'
+      ? 'Optimal speed'
+      : prepMetrics.slaHealth === 'warning'
+        ? 'Watch pace'
+        : prepMetrics.slaHealth === 'slow'
+          ? 'Slow queue'
+          : 'No data yet';
+
   const renderColumn = (
     title: string,
     list: typeof activeKdsOrders,
@@ -58,9 +102,10 @@ export function KdsView({ standalone = false }: KdsViewProps) {
           <div className="py-12 text-center text-xs text-slate-500">No tickets</div>
         ) : (
           list.map((ord) => {
+            const submittedMs = Date.parse(ord.kdsSubmittedAt || ord.createdAt);
             const elapsedMin = Math.max(
               1,
-              Math.round((Date.now() - new Date(ord.createdAt).getTime()) / 60000)
+              Math.round((nowMs - (Number.isFinite(submittedMs) ? submittedMs : nowMs)) / 60000)
             );
             const isLate = elapsedMin >= activeBranch.kdsLateMinutes;
             const isWarn = !isLate && elapsedMin >= activeBranch.kdsWarnMinutes;
@@ -118,7 +163,10 @@ export function KdsView({ standalone = false }: KdsViewProps) {
                 <div className="px-3 pb-3">
                   <button
                     type="button"
-                    onClick={() => advanceKdsOrder(ord.id, nextStatus)}
+                    onClick={() => {
+                      advanceKdsOrder(ord.id, nextStatus);
+                      setNowMs(Date.now());
+                    }}
                     className={`w-full rounded-lg py-2 text-xs font-bold transition-colors ${btnStyle}`}
                   >
                     {actionLabel}
@@ -135,7 +183,7 @@ export function KdsView({ standalone = false }: KdsViewProps) {
   return (
     <div className="min-h-full bg-[#0A1116] text-white p-4 flex flex-col gap-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
           {standalone && (
             <button
               type="button"
@@ -194,6 +242,85 @@ export function KdsView({ standalone = false }: KdsViewProps) {
             {chimeOn ? <Volume2 className="h-3.5 w-3.5 text-emerald-400" /> : <VolumeX className="h-3.5 w-3.5" />}
             {chimeOn ? 'Chime on' : 'Muted'}
           </button>
+        </div>
+      </div>
+
+      {/* Average Preparation Time & Kitchen Throughput Strip */}
+      <div
+        data-testid="kds-avg-prep-metric"
+        className="grid grid-cols-2 lg:grid-cols-4 gap-3"
+      >
+        <div className="rounded-xl border border-slate-800 bg-[#11191E] px-4 py-3 flex items-center justify-between gap-3">
+          <div>
+            <div className="text-[11px] font-medium text-slate-400 flex items-center gap-1.5">
+              <Timer className="h-3.5 w-3.5 text-emerald-400" />
+              Average Preparation Time
+            </div>
+            <div
+              data-testid="kds-avg-prep-value"
+              className="mt-1 text-xl font-bold text-white tabular-nums"
+            >
+              {prepMetrics.formattedAvgPrepTime}
+            </div>
+            <div className="text-[11px] text-slate-400">
+              {prepMetrics.completedCount > 0
+                ? `${prepMetrics.avgPrepMinutes?.toFixed(1)} min avg · Target ≤ ${activeBranch.kdsLateMinutes}m`
+                : 'Complete a ticket to measure'}
+            </div>
+          </div>
+          <span
+            className={`shrink-0 rounded-md border px-2 py-0.5 text-[11px] font-semibold ${slaBadgeStyle}`}
+          >
+            {slaBadgeLabel}
+          </span>
+        </div>
+
+        <div className="rounded-xl border border-slate-800 bg-[#11191E] px-4 py-3">
+          <div className="text-[11px] font-medium text-slate-400 flex items-center gap-1.5">
+            <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />
+            Completed Tickets
+          </div>
+          <div
+            data-testid="kds-completed-count"
+            className="mt-1 text-xl font-bold text-white tabular-nums"
+          >
+            {prepMetrics.completedCount}
+          </div>
+          <div className="text-[11px] text-slate-400">
+            {prepMetrics.withinTargetPct !== null
+              ? `${prepMetrics.withinTargetPct}% within ${activeBranch.kdsLateMinutes}m target`
+              : 'Submission to ready'}
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-slate-800 bg-[#11191E] px-4 py-3">
+          <div className="text-[11px] font-medium text-slate-400 flex items-center gap-1.5">
+            <Gauge className="h-3.5 w-3.5 text-sky-400" />
+            Fastest / Slowest Prep
+          </div>
+          <div className="mt-1 text-xl font-bold text-white tabular-nums">
+            {prepMetrics.fastestMinutes !== null && prepMetrics.slowestMinutes !== null
+              ? `${prepMetrics.fastestMinutes.toFixed(1)}m / ${prepMetrics.slowestMinutes.toFixed(1)}m`
+              : '—'}
+          </div>
+          <div className="text-[11px] text-slate-400">
+            {stationFilter === 'all' ? 'All stations' : `${stationFilter} station only`}
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-slate-800 bg-[#11191E] px-4 py-3">
+          <div className="text-[11px] font-medium text-slate-400 flex items-center gap-1.5">
+            <Clock className="h-3.5 w-3.5 text-amber-400" />
+            Active Queue Avg Wait
+          </div>
+          <div className="mt-1 text-xl font-bold text-white tabular-nums">
+            {prepMetrics.activeAvgWaitMinutes !== null
+              ? `${prepMetrics.activeAvgWaitMinutes.toFixed(1)} min`
+              : '0.0 min'}
+          </div>
+          <div className="text-[11px] text-slate-400">
+            {prepMetrics.activeCount} {prepMetrics.activeCount === 1 ? 'ticket' : 'tickets'} in progress
+          </div>
         </div>
       </div>
 

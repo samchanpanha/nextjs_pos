@@ -154,6 +154,7 @@ export interface BranchConfig {
   displayFeaturedMode: 'auto' | 'manual' | 'off';
   displayShowNewPage: boolean;
   printerAutoBrowser: boolean;
+  dailySalesTargetUsd?: number;
   invoiceTemplate?: InvoiceTemplateConfig;
 }
 
@@ -225,6 +226,9 @@ export interface PosOrder {
   promoDiscountUsd: number;
   appliedPromoName?: string;
   pointsRedeemed: number;
+  loyaltyItemPointsRedeemed?: number;
+  loyaltyPointsEarned?: number;
+  loyaltyPointsBalanceAfter?: number;
   memberId?: string;
   memberPhone?: string;
   prepaidCustomerPackId?: string;
@@ -244,6 +248,9 @@ export interface PosOrder {
   createdAt: string;
   updatedAt: string;
   closedAt?: string;
+  kdsSubmittedAt?: string;
+  kdsCompletedAt?: string;
+  sourceQrId?: string;
   offlinePendingSync?: boolean;
 }
 
@@ -372,6 +379,29 @@ export interface CustomerPrepaidPack {
   active: boolean;
 }
 
+export interface LoyaltyTransaction {
+  id: string;
+  memberId: string;
+  orderId?: string;
+  orderNumber?: number;
+  type: 'earn' | 'redeem_discount' | 'redeem_item' | 'bonus' | 'adjust';
+  pointsDelta: number;
+  balanceAfter: number;
+  description: string;
+  amountUsd?: number;
+  createdAt: string;
+}
+
+export interface LoyaltyReward {
+  id: string;
+  branchId: string;
+  name: string;
+  menuItemId: string;
+  menuItemName: string;
+  pointsCost: number;
+  active: boolean;
+}
+
 export interface MemberCustomer {
   id: string;
   name: string;
@@ -380,6 +410,7 @@ export interface MemberCustomer {
   totalSpentUsd: number;
   tier: 'Member' | 'Silver' | 'Gold';
   lastVisit: string;
+  loyaltyHistory?: LoyaltyTransaction[];
 }
 
 export interface VatInvoice {
@@ -671,6 +702,7 @@ export interface PosAppState {
   prepaidTemplates: PrepaidPackTemplate[];
   customerPacks: CustomerPrepaidPack[];
   members: MemberCustomer[];
+  loyaltyRewards?: LoyaltyReward[];
   invoices: VatInvoice[];
   auditLogs: AuditLogEntry[];
   groupSessions: GroupOrderSession[];

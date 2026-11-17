@@ -56,11 +56,45 @@ function buildHeaders(extra?: {
   return headers;
 }
 
+export class SyncConflictClientError extends Error {
+  readonly code = 'SYNC_CONFLICT' as const;
+  readonly status = 409;
+  readonly clientVersion: number;
+  readonly serverVersion: number;
+  readonly serverOrdersCount?: number;
+
+  constructor(params: {
+    message: string;
+    clientVersion: number;
+    serverVersion: number;
+    serverOrdersCount?: number;
+  }) {
+    super(params.message);
+    this.name = 'SyncConflictClientError';
+    this.clientVersion = params.clientVersion;
+    this.serverVersion = params.serverVersion;
+    this.serverOrdersCount = params.serverOrdersCount;
+  }
+}
+
 async function parseApiJson<T>(res: Response): Promise<T> {
   const payload = (await res.json().catch(() => ({}))) as T & {
     ok?: boolean;
     error?: string;
+    code?: string;
+    clientVersion?: number;
+    serverVersion?: number;
+    serverOrdersCount?: number;
   };
+  if (res.status === 409 || payload.code === 'SYNC_CONFLICT') {
+    throw new SyncConflictClientError({
+      message: payload.error || 'Sync conflict with main server.',
+      clientVersion: Number(payload.clientVersion ?? 0),
+      serverVersion: Number(payload.serverVersion ?? 0),
+      serverOrdersCount:
+        typeof payload.serverOrdersCount === 'number' ? payload.serverOrdersCount : undefined,
+    });
+  }
   if (!res.ok || payload.ok === false) {
     throw new Error(payload.error || `Request failed (${res.status})`);
   }
@@ -208,13 +242,22 @@ export async function createTenantInSqlite(
 
 export async function saveTenantToSqlite(
   tenant: PosAppState,
-  extra?: { staffRole?: string; adminPin?: string }
+  extra?: {
+    staffRole?: string;
+    adminPin?: string;
+    expectedVersion?: number;
+    forceOverwrite?: boolean;
+  }
 ): Promise<PosAppState> {
   const tid = tenant.tenantId || 'tenant_lotus_bkk1';
   const res = await fetch(`/api/tenants/${encodeURIComponent(tid)}`, {
     method: 'PUT',
     headers: buildHeaders(extra),
-    body: JSON.stringify({ tenant: { ...tenant, tenantId: tid } }),
+    body: JSON.stringify({
+      tenant: { ...tenant, tenantId: tid },
+      expectedVersion: extra?.expectedVersion,
+      forceOverwrite: extra?.forceOverwrite,
+    }),
   });
   const data = await parseApiJson<{ ok: boolean; tenant: PosAppState }>(res);
   return data.tenant;

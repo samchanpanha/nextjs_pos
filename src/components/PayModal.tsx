@@ -11,6 +11,9 @@ import {
   Ticket,
   RefreshCw,
   CheckCircle2,
+  Gift,
+  UserPlus,
+  Search,
 } from 'lucide-react';
 import { usePos } from '../context/PosContext';
 import type { PosOrder } from '../types/pos';
@@ -20,6 +23,15 @@ import {
   evaluateBestPromotion,
   usdToKhr,
 } from '../utils/posMath';
+import {
+  calculatePointsDiscountUsd,
+  calculatePointsEarned,
+  findMemberByPhone,
+  getMaxRedeemableDiscountPoints,
+  getOrderLoyaltyItemPointsUsed,
+  normalizeCustomerPhone,
+  searchMembers,
+} from '../utils/loyaltyEngine';
 import {
   generateBakongKhqrPayload,
   isMerchantKhqrConfigured,
@@ -39,6 +51,9 @@ export function PayModal({ order, onClose }: PayModalProps) {
     applyOrderDiscount,
     setOrderPromoCode,
     attachMemberToOrder,
+    redeemLoyaltyItem,
+    removeRedeemedLoyaltyItem,
+    addLoyaltyMember,
     applyPrepaidPack,
     settleOrderPayment,
     setDisplayOrder,
@@ -55,6 +70,9 @@ export function PayModal({ order, onClose }: PayModalProps) {
   const [managerPin, setManagerPin] = useState('');
   const [showDiscountBox, setShowDiscountBox] = useState(false);
   const [memberPhone, setMemberPhone] = useState(order.memberPhone || '');
+  const [showMemberPicker, setShowMemberPicker] = useState(false);
+  const [showQuickEnroll, setShowQuickEnroll] = useState(false);
+  const [quickEnrollName, setQuickEnrollName] = useState('');
   const [redeemPoints, setRedeemPoints] = useState(order.pointsRedeemed || 0);
   const [promoCodeInput, setPromoCodeInput] = useState(order.promoCode || '');
   const [pinError, setPinError] = useState('');
@@ -102,14 +120,47 @@ export function PayModal({ order, onClose }: PayModalProps) {
     rielRounding: activeBranch.rielRounding,
   });
 
-  const matchedMember = state.members.find(
-    (m) => m.phone.replace(/\s+/g, '') === memberPhone.replace(/\s+/g, '')
+  const matchedMember = findMemberByPhone(state.members, order.memberPhone || memberPhone);
+  const memberSearchResults = searchMembers(state.members, memberPhone).slice(0, 6);
+  const itemPointsUsed = getOrderLoyaltyItemPointsUsed(order.items);
+  const discountPointsUsed = order.pointsRedeemed || 0;
+  const availablePointsForDiscount = matchedMember
+    ? Math.max(0, matchedMember.points - itemPointsUsed)
+    : 0;
+  const remainingPointsBalance = matchedMember
+    ? Math.max(0, availablePointsForDiscount - discountPointsUsed)
+    : 0;
+  const maxDiscountPoints =
+    matchedMember && activeBranch.pointsEnabled
+      ? getMaxRedeemableDiscountPoints({
+          memberPoints: matchedMember.points,
+          alreadyUsedForItems: itemPointsUsed,
+          remainingSubtotalUsd: totals.subtotalUsd,
+          pointsValuePer100: activeBranch.pointsValuePer100,
+          step: 50,
+        })
+      : 0;
+  const pointsDiscountUsd = calculatePointsDiscountUsd(
+    discountPointsUsed,
+    activeBranch.pointsValuePer100
   );
+  const estimatedEarnPoints = matchedMember
+    ? calculatePointsEarned({
+        totalUsd: totals.totalUsd,
+        pointsPerDollar: activeBranch.pointsPerDollar,
+        pointsEnabled: activeBranch.pointsEnabled,
+        offlineMode: state.offlineMode,
+      })
+    : 0;
+  const activeBranchRewards = (state.loyaltyRewards || []).filter(
+    (r) => r.branchId === activeBranch.id && r.active
+  );
+
   const matchingPack = state.customerPacks.find(
     (p) =>
       p.active &&
       p.usesLeft > 0 &&
-      p.phone.replace(/\s+/g, '') === memberPhone.replace(/\s+/g, '')
+      normalizeCustomerPhone(p.phone) === normalizeCustomerPhone(matchedMember?.phone || memberPhone)
   );
 
   const setDisplayOrderRef = useRef(setDisplayOrder);
@@ -220,6 +271,80 @@ export function PayModal({ order, onClose }: PayModalProps) {
     }
   };
 
+  const activeKhqrMd5 = payMethod === 'KHQR' ? khqrResult?.md5 ?? null : null;
+  const settleOrderPaymentRef = useRef(settleOrderPayment);
+  settleOrderPaymentRef.current = settleOrderPayment;
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+
+  useEffect(() => {
+    if (payMethod !== 'KHQR' || !activeKhqrMd5 || state.offlineMode) return;
+    let cancelled = false;
+    let inFlight = false;
+    const controller = new AbortController();
+
+    const pollModalKhqr = async () => {
+      if (cancelled || inFlight) return;
+      inFlight = true;
+      try {
+        const res = await fetch('/api/bakong/check-transaction', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ md5: activeKhqrMd5 }),
+          signal: controller.signal,
+        });
+        const data = (await res.json()) as {
+          paid?: boolean;
+          transactionRef?: string | null;
+        };
+        if (cancelled) return;
+        if (res.ok && data.paid) {
+          const ref =
+            data.transactionRef || `KHQR-${activeKhqrMd5.slice(0, 8).toUpperCase()}`;
+          setTxRef(ref);
+          settleOrderPaymentRef.current(order.id, {
+            method: 'KHQR',
+            paidUsd: khqrCurrency === 'USD' ? totals.totalUsd : 0,
+            paidKhr: khqrCurrency === 'KHR' ? totalKhrDue : 0,
+            changeUsd: 0,
+            changeKhr: 0,
+            paymentRef: ref,
+            promoDiscountUsd: effectivePromoDiscount,
+            appliedPromoName: autoPromo.promotion?.nameEn || order.appliedPromoName,
+            totalUsd: totals.totalUsd,
+            totalKhr: totalKhrDue,
+          });
+          onCloseRef.current();
+        }
+      } catch {
+        // Ignore transient or aborted polls
+      } finally {
+        inFlight = false;
+      }
+    };
+
+    const timer = window.setInterval(() => {
+      void pollModalKhqr();
+    }, 3000);
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+      window.clearInterval(timer);
+    };
+  }, [
+    payMethod,
+    activeKhqrMd5,
+    state.offlineMode,
+    order.id,
+    order.appliedPromoName,
+    khqrCurrency,
+    totals.totalUsd,
+    totalKhrDue,
+    effectivePromoDiscount,
+    autoPromo.promotion?.nameEn,
+  ]);
+
   const handleConfirmPayment = () => {
     const settlementTotals = {
       promoDiscountUsd: effectivePromoDiscount,
@@ -300,15 +425,32 @@ export function PayModal({ order, onClose }: PayModalProps) {
                 {order.items
                   .filter((i) => !i.voided)
                   .map((item) => (
-                    <div key={item.id} className="flex justify-between gap-2">
-                      <span className="text-slate-800">
+                    <div key={item.id} className="flex items-center justify-between gap-2">
+                      <span className="text-slate-800 min-w-0 truncate">
                         <strong className="tabular-nums">{item.qty}×</strong> {item.nameEn}
                         {item.optionLabel ? ` (${item.optionLabel})` : ''}
+                        {item.redeemedByLoyalty && (
+                          <span className="ml-1.5 inline-flex items-center rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-900">
+                            Free · -{item.loyaltyPointsCost || 0} pts
+                          </span>
+                        )}
                       </span>
-                      <span className="font-semibold tabular-nums text-slate-900 shrink-0">
+                      <span className="inline-flex items-center gap-1.5 font-semibold tabular-nums text-slate-900 shrink-0">
                         {item.coveredByPack
                           ? '$0.00 (Pack)'
-                          : `$${(item.unitPriceUsd * item.qty).toFixed(2)}`}
+                          : item.redeemedByLoyalty
+                            ? '$0.00 (Loyalty)'
+                            : `$${(item.unitPriceUsd * item.qty).toFixed(2)}`}
+                        {item.redeemedByLoyalty && (
+                          <button
+                            type="button"
+                            onClick={() => removeRedeemedLoyaltyItem(order.id, item.id)}
+                            aria-label={`Remove redeemed ${item.nameEn}`}
+                            className="rounded p-0.5 text-slate-400 hover:bg-slate-200 hover:text-slate-700"
+                          >
+                            <X className="h-3 w-3" />
+                          </button>
+                        )}
                       </span>
                     </div>
                   ))}
@@ -372,6 +514,13 @@ export function PayModal({ order, onClose }: PayModalProps) {
                   </div>
                 )}
 
+                {pointsDiscountUsd > 0 && (
+                  <div className="flex justify-between text-amber-800 font-medium">
+                    <span>Points discount ({discountPointsUsed} pts)</span>
+                    <span>-${pointsDiscountUsd.toFixed(2)}</span>
+                  </div>
+                )}
+
                 <div className="flex justify-between text-slate-600">
                   <span>VAT {activeBranch.vatPercent}%</span>
                   <span>${totals.vatUsd.toFixed(2)}</span>
@@ -385,39 +534,259 @@ export function PayModal({ order, onClose }: PayModalProps) {
                 )}
               </div>
 
-              {/* Member Phone & Points */}
+              {/* Customer Loyalty Search, Accrual Preview & Redemption */}
               <div className="mt-4 space-y-2">
-                <div className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5">
-                  <Star className="h-3.5 w-3.5 text-amber-500 shrink-0" />
-                  <input
-                    type="tel"
-                    value={memberPhone}
-                    onChange={(e) => {
-                      setMemberPhone(e.target.value);
-                      attachMemberToOrder(order.id, e.target.value, redeemPoints);
-                    }}
-                    placeholder="Member phone (e.g. 098765432)"
-                    className="flex-1 text-xs focus:outline-none"
-                  />
-                </div>
-
-                {matchedMember && (
-                  <div className="rounded-lg border border-amber-200 bg-amber-50/70 px-2.5 py-2 text-[11px] flex items-center justify-between">
-                    <span>
-                      <strong>{matchedMember.name}</strong> ({matchedMember.tier} · {matchedMember.points} pts)
-                    </span>
-                    {matchedMember.points >= 50 && (
+                <div className="relative">
+                  <div className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5">
+                    <Search className="h-3.5 w-3.5 text-amber-500 shrink-0" />
+                    <input
+                      type="text"
+                      value={memberPhone}
+                      onFocus={() => setShowMemberPicker(true)}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setMemberPhone(val);
+                        setShowMemberPicker(true);
+                        if (!val.trim()) {
+                          setRedeemPoints(0);
+                          attachMemberToOrder(order.id, '', 0);
+                        } else {
+                          const direct = findMemberByPhone(state.members, val);
+                          if (direct) {
+                            attachMemberToOrder(order.id, direct.phone, redeemPoints);
+                          }
+                        }
+                      }}
+                      placeholder="Customer phone or name (e.g. Dara)"
+                      className="flex-1 text-xs focus:outline-none"
+                    />
+                    {(memberPhone || matchedMember) && (
                       <button
                         type="button"
+                        aria-label="Clear loyalty customer"
                         onClick={() => {
-                          const next = redeemPoints > 0 ? 0 : Math.min(matchedMember.points, 200);
-                          setRedeemPoints(next);
-                          attachMemberToOrder(order.id, memberPhone, next);
+                          setMemberPhone('');
+                          setRedeemPoints(0);
+                          setShowMemberPicker(false);
+                          setShowQuickEnroll(false);
+                          attachMemberToOrder(order.id, '', 0);
                         }}
-                        className="font-semibold text-amber-900 underline"
+                        className="rounded p-0.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700"
                       >
-                        {redeemPoints > 0 ? 'Remove pts' : 'Redeem 100 pts'}
+                        <X className="h-3.5 w-3.5" />
                       </button>
+                    )}
+                  </div>
+
+                  {showMemberPicker && !matchedMember && memberSearchResults.length > 0 && (
+                    <div className="mt-1 rounded-lg border border-slate-200 bg-white shadow-sm divide-y divide-slate-100 max-h-36 overflow-y-auto">
+                      {memberSearchResults.map((m) => (
+                        <button
+                          key={m.id}
+                          type="button"
+                          onClick={() => {
+                            setMemberPhone(m.phone);
+                            setShowMemberPicker(false);
+                            setShowQuickEnroll(false);
+                            attachMemberToOrder(order.id, m.phone, redeemPoints);
+                          }}
+                          className="w-full px-2.5 py-1.5 text-left text-[11px] flex items-center justify-between hover:bg-amber-50/70"
+                        >
+                          <span>
+                            <strong className="text-slate-900">{m.name}</strong>{' '}
+                            <span className="font-mono text-slate-500">{m.phone}</span>
+                          </span>
+                          <span className="font-semibold text-amber-800 tabular-nums">
+                            {m.tier} · {m.points} pts
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {!matchedMember &&
+                  /^\+?[\d\s()-]{6,}$/.test(memberPhone.trim()) &&
+                  memberSearchResults.length === 0 && (
+                  <div className="rounded-lg border border-slate-200 bg-white p-2 text-[11px] space-y-1.5">
+                    {!showQuickEnroll ? (
+                      <button
+                        type="button"
+                        onClick={() => setShowQuickEnroll(true)}
+                        className="w-full flex items-center justify-center gap-1.5 font-semibold text-emerald-800 hover:underline"
+                      >
+                        <UserPlus className="h-3.5 w-3.5" />
+                        Quick enroll "{memberPhone.trim()}" into loyalty
+                      </button>
+                    ) : (
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          type="text"
+                          value={quickEnrollName}
+                          onChange={(e) => setQuickEnrollName(e.target.value)}
+                          placeholder="Customer full name"
+                          className="flex-1 rounded border border-slate-300 px-2 py-1 text-xs"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const digits = normalizeCustomerPhone(memberPhone);
+                            const nameToUse = quickEnrollName.trim() || 'Guest Member';
+                            const phoneToUse = digits.length >= 6 ? digits : '';
+                            if (!phoneToUse) return;
+                            const created = addLoyaltyMember({
+                              name: nameToUse,
+                              phone: phoneToUse,
+                              initialPoints: 20,
+                            });
+                            if (created) {
+                              setMemberPhone(created.phone);
+                              setQuickEnrollName('');
+                              setShowQuickEnroll(false);
+                              setShowMemberPicker(false);
+                              attachMemberToOrder(order.id, created.phone, 0);
+                            }
+                          }}
+                          className="rounded bg-emerald-800 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-emerald-900"
+                        >
+                          Enroll
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {matchedMember && (
+                  <div className="rounded-lg border border-amber-200 bg-amber-50/80 p-2.5 text-[11px] space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <div>
+                        <div className="font-bold text-slate-900 flex items-center gap-1.5">
+                          <Star className="h-3.5 w-3.5 text-amber-500 fill-amber-400" />
+                          <span>{matchedMember.name}</span>
+                          <span className="rounded bg-amber-200/80 px-1.5 py-0.5 text-[10px] font-bold text-amber-950">
+                            {matchedMember.tier}
+                          </span>
+                        </div>
+                        <div className="text-[10px] text-slate-600 tabular-nums mt-0.5">
+                          Balance: <strong>{remainingPointsBalance} pts</strong> left
+                          {(itemPointsUsed > 0 || discountPointsUsed > 0) && (
+                            <span> ({matchedMember.points} total)</span>
+                          )}
+                        </div>
+                      </div>
+                      <span className="rounded-md bg-emerald-100 px-2 py-0.5 text-[10px] font-bold text-emerald-900 tabular-nums shrink-0">
+                        {state.offlineMode
+                          ? 'Offline (0 pts)'
+                          : activeBranch.pointsEnabled
+                            ? `+${estimatedEarnPoints} pts earn`
+                            : 'Points paused'}
+                      </span>
+                    </div>
+
+                    {activeBranch.pointsEnabled && availablePointsForDiscount >= 50 && (
+                      <div className="space-y-1 pt-1 border-t border-amber-200/70">
+                        <div className="flex items-center justify-between text-[10px] font-semibold text-amber-950">
+                          <span>
+                            Redeem discount (100 pts = ${activeBranch.pointsValuePer100.toFixed(2)})
+                          </span>
+                          {discountPointsUsed > 0 && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setRedeemPoints(0);
+                                attachMemberToOrder(order.id, matchedMember.phone, 0);
+                              }}
+                              className="text-red-700 hover:underline"
+                            >
+                              Clear
+                            </button>
+                          )}
+                        </div>
+                        <div className="flex flex-wrap gap-1">
+                          {[50, 100, 200].map((pts) => {
+                            const disabled =
+                              pts > availablePointsForDiscount || pts > maxDiscountPoints;
+                            const active = discountPointsUsed === pts;
+                            const offUsd = calculatePointsDiscountUsd(
+                              pts,
+                              activeBranch.pointsValuePer100
+                            );
+                            return (
+                              <button
+                                key={pts}
+                                type="button"
+                                disabled={disabled}
+                                onClick={() => {
+                                  const next = active ? 0 : pts;
+                                  setRedeemPoints(next);
+                                  attachMemberToOrder(order.id, matchedMember.phone, next);
+                                }}
+                                className={`rounded border px-2 py-0.5 text-[10px] font-semibold tabular-nums ${
+                                  active
+                                    ? 'border-amber-800 bg-amber-800 text-white'
+                                    : 'border-amber-300 bg-white text-amber-950 hover:bg-amber-100 disabled:opacity-40'
+                                }`}
+                              >
+                                {pts} pts (-${offUsd.toFixed(2)})
+                              </button>
+                            );
+                          })}
+                          {maxDiscountPoints > 0 && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setRedeemPoints(maxDiscountPoints);
+                                attachMemberToOrder(order.id, matchedMember.phone, maxDiscountPoints);
+                              }}
+                              className={`rounded border px-2 py-0.5 text-[10px] font-semibold tabular-nums ${
+                                discountPointsUsed === maxDiscountPoints
+                                  ? 'border-amber-800 bg-amber-800 text-white'
+                                  : 'border-amber-300 bg-white text-amber-950 hover:bg-amber-100'
+                              }`}
+                            >
+                              Max ({maxDiscountPoints})
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    )}
+
+                    {activeBranch.pointsEnabled && activeBranchRewards.length > 0 && (
+                      <div className="space-y-1 pt-1 border-t border-amber-200/70">
+                        <div className="flex items-center gap-1 text-[10px] font-semibold text-amber-950">
+                          <Gift className="h-3 w-3" />
+                          <span>Redeem free item</span>
+                        </div>
+                        <div className="grid grid-cols-2 gap-1">
+                          {activeBranchRewards.slice(0, 4).map((rw) => {
+                            const canAfford = remainingPointsBalance >= rw.pointsCost;
+                            const inCart = order.items.some(
+                              (it) =>
+                                !it.voided &&
+                                !it.coveredByPack &&
+                                !it.redeemedByLoyalty &&
+                                it.menuItemId === rw.menuItemId
+                            );
+                            return (
+                              <button
+                                key={rw.id}
+                                type="button"
+                                disabled={!canAfford}
+                                onClick={() => redeemLoyaltyItem(order.id, rw.id)}
+                                className="flex items-center justify-between gap-1 rounded border border-amber-300 bg-white px-2 py-1 text-left text-[10px] hover:bg-amber-100 disabled:opacity-40"
+                              >
+                                <span className="truncate font-semibold text-slate-800">
+                                  {rw.name}
+                                  {inCart ? ' (cover)' : ''}
+                                </span>
+                                <span className="font-bold text-amber-900 tabular-nums shrink-0">
+                                  {rw.pointsCost}p
+                                </span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
                     )}
                   </div>
                 )}
@@ -786,11 +1155,12 @@ export function PayModal({ order, onClose }: PayModalProps) {
                     </div>
 
                     <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-xs text-emerald-950 space-y-1">
-                      <div className="font-semibold">
-                        Bakong Open API Ready ({activeBranch.khqrAccountType || 'individual'})
+                      <div className="font-semibold flex items-center gap-1.5">
+                        <span className="h-2 w-2 rounded-full bg-emerald-600 animate-pulse" />
+                        Auto-listening Bakong KHQR ({activeBranch.khqrAccountType || 'individual'})
                       </div>
                       <p className="text-[11px] text-emerald-800">
-                        Scan with Bakong, ABA, ACLEDA, or Wing. Amount &amp; bill #ORD-{order.orderNumber} are embedded.
+                        Polling every 3s for Bakong callback. Order #ORD-{order.orderNumber} marks Paid automatically once scanned &amp; confirmed.
                       </p>
                       <div className="text-[10px] font-mono text-emerald-800 pt-0.5">
                         MD5 ref: {khqrResult.md5.slice(0, 16)}…

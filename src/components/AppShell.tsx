@@ -100,6 +100,9 @@ export function AppShell({ children }: AppShellProps) {
     resetDemoData,
     toasts,
     dismissToast,
+    aiStockAlerts,
+    dismissAiStockAlert,
+    receiptOrder,
   } = usePos();
 
   const isAdminActor = isSuperAdmin(activeStaff);
@@ -169,8 +172,14 @@ export function AppShell({ children }: AppShellProps) {
   const lowIngredients = isAdminActor
     ? []
     : state.ingredients.filter((i) => i.branchId === activeBranch.id && i.onHand <= i.minLevel);
+  const branchAiStockAlerts = isAdminActor
+    ? []
+    : aiStockAlerts.filter((a) => a.branchId === activeBranch.id);
+  const aiAlertIngredientIds = new Set(branchAiStockAlerts.map((a) => a.ingredientId));
+  const extraLowIngredients = lowIngredients.filter((i) => !aiAlertIngredientIds.has(i.id));
   const offlineBillsCount = state.orders.filter((o) => o.offlinePendingSync).length;
-  const totalNotifications = pendingQr.length + lowIngredients.length;
+  const totalNotifications =
+    pendingQr.length + branchAiStockAlerts.length + extraLowIngredients.length;
 
   const navItems: {
     id: NavSection;
@@ -254,7 +263,11 @@ export function AppShell({ children }: AppShellProps) {
   };
 
   return (
-    <div className="h-screen overflow-hidden flex bg-[#F4F6F5] text-slate-900">
+    <div
+      className={`h-screen overflow-hidden flex bg-[#F4F6F5] text-slate-900 ${
+        receiptOrder ? 'no-print' : ''
+      }`}
+    >
       {/* Dark Emerald Grouped Sidebar (Collapsible Rail <-> Full SaaS Drawer) */}
       <aside
         className={`no-print hidden md:flex shrink-0 flex-col bg-[#08382D] text-emerald-100 select-none transition-all duration-200 ${
@@ -647,10 +660,12 @@ export function AppShell({ children }: AppShellProps) {
                       <X className="h-3.5 w-3.5" />
                     </button>
                   </div>
-                  {pendingQr.length === 0 && lowIngredients.length === 0 ? (
+                  {pendingQr.length === 0 &&
+                  branchAiStockAlerts.length === 0 &&
+                  extraLowIngredients.length === 0 ? (
                     <p className="text-xs text-slate-500 py-3 text-center">No pending alerts.</p>
                   ) : (
-                    <div className="space-y-2 max-h-72 overflow-y-auto">
+                    <div className="space-y-2 max-h-80 overflow-y-auto">
                       {pendingQr.map((qr) => (
                         <div
                           key={qr.id}
@@ -687,7 +702,64 @@ export function AppShell({ children }: AppShellProps) {
                         </div>
                       ))}
 
-                      {lowIngredients.map((ing) => (
+                      {branchAiStockAlerts.map((alert) => (
+                        <div
+                          key={alert.id}
+                          className={`rounded-lg border p-2.5 text-xs space-y-1.5 ${
+                            alert.urgency === 'out' || alert.urgency === 'critical'
+                              ? 'border-red-200 bg-red-50/70'
+                              : 'border-amber-200 bg-amber-50/80'
+                          }`}
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <div>
+                              <span
+                                className={`inline-block rounded px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide ${
+                                  alert.urgency === 'out' || alert.urgency === 'critical'
+                                    ? 'bg-red-100 text-red-900'
+                                    : 'bg-amber-100 text-amber-900'
+                                }`}
+                              >
+                                AI Stock Monitor ·{' '}
+                                {alert.urgency === 'out'
+                                  ? 'Out of stock'
+                                  : alert.estimatedDaysRemaining !== null
+                                    ? `${alert.estimatedDaysRemaining}d left`
+                                    : 'Low stock'}
+                              </span>
+                              <div className="font-semibold text-slate-900 mt-1">
+                                {alert.ingredientName} ({alert.onHand} {alert.unit})
+                              </div>
+                            </div>
+                            <button
+                              type="button"
+                              aria-label={`Dismiss alert for ${alert.ingredientName}`}
+                              onClick={() => dismissAiStockAlert(alert.id)}
+                              className="text-slate-400 hover:text-slate-700"
+                            >
+                              <X className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
+                          <p className="text-[11px] text-slate-700 leading-snug">{alert.message}</p>
+                          <div className="flex items-center justify-between pt-0.5">
+                            <span className="text-[11px] text-slate-500">
+                              Run-out: {alert.predictedRunOutDate}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setNavSection('stock');
+                                setNotifOpen(false);
+                              }}
+                              className="font-semibold text-emerald-900 underline"
+                            >
+                              Open Stock
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+
+                      {extraLowIngredients.map((ing) => (
                         <div
                           key={ing.id}
                           className="rounded-lg border border-amber-200 bg-amber-50 p-2 text-xs flex items-center justify-between"

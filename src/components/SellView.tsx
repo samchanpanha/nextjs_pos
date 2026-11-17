@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { flushSync } from 'react-dom';
 import {
   Search,
   Plus,
@@ -13,12 +14,25 @@ import {
   Calendar,
   ShoppingCart,
   X,
+  QrCode,
+  CheckCircle2,
+  Printer,
 } from 'lucide-react';
 import { usePos } from '../context/PosContext';
 import { I18N } from '../data/i18n';
 import type { MenuItem, OrderChannel } from '../types/pos';
+import {
+  buildOrderKhqrCandidates,
+  matchPaidBakongResult,
+  shouldPollOrderKhqr,
+  type BakongCheckTransactionResponse,
+} from '../utils/bakongPolling';
 import { calculateOrderTotals, usdToKhr } from '../utils/posMath';
+import { findMostRecentlyCompletedOrder } from '../utils/receiptPrint';
 import { PayModal } from './PayModal';
+import { SuggestedPairingsCard } from './SuggestedPairingsCard';
+import { DailySalesSummaryCard } from './DailySalesSummaryCard';
+import { SyncStatusAlertBanner, SyncStatusToolbarControl } from './SyncStatusIndicator';
 
 const QUICK_NOTES = ['No ice', 'Less ice', 'Less sugar', 'Less spicy', 'No onion', 'Serve first'];
 
@@ -44,6 +58,8 @@ export function SellView() {
     voidOrder,
     moveOrderToTable,
     splitOrderItems,
+    settleOrderPayment,
+    setReceiptOrder,
   } = usePos();
 
   const t = I18N[language];
@@ -65,8 +81,20 @@ export function SellView() {
   const [voidModalLineId, setVoidModalLineId] = useState<string | null>(null);
   const [voidPin, setVoidPin] = useState('');
   const [voidError, setVoidError] = useState('');
+  const [khqrAutoPollEnabled, setKhqrAutoPollEnabled] = useState(true);
+  const [khqrPollStatus, setKhqrPollStatus] = useState<'idle' | 'listening' | 'error'>('idle');
+  const [khqrLastCheckedAt, setKhqrLastCheckedAt] = useState<string | null>(null);
+  const [khqrAutoPaidNotice, setKhqrAutoPaidNotice] = useState<{
+    orderNumber: number;
+    tableName: string;
+    totalUsd: number;
+    paymentRef: string;
+  } | null>(null);
 
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const autoSettledOrdersRef = useRef<Set<string>>(new Set());
+  const settleOrderPaymentRef = useRef(settleOrderPayment);
+  settleOrderPaymentRef.current = settleOrderPayment;
 
   const branchTables = state.tables.filter((tb) => tb.branchId === activeBranch.id);
   const branchMenu = state.menuItems.filter((m) => m.branchId === activeBranch.id && m.active);
@@ -75,6 +103,18 @@ export function SellView() {
   const activeOrder = state.orders.find(
     (o) => o.id === activeOrderId && o.status !== 'paid' && o.status !== 'voided'
   );
+  const lastCompletedOrder = useMemo(
+    () => findMostRecentlyCompletedOrder(state.orders, activeBranch.id),
+    [state.orders, activeBranch.id]
+  );
+
+  const handlePrintLastReceipt = () => {
+    if (!lastCompletedOrder) return;
+    flushSync(() => {
+      setReceiptOrder(lastCompletedOrder);
+    });
+    window.print();
+  };
 
   // Keyboard shortcuts F2 search, F3 send to kitchen, F9 pay
   useEffect(() => {
@@ -136,15 +176,134 @@ export function SellView() {
       })
     : null;
 
-  // "Often ordered with" suggestions (Page 8)
-  const suggestedIds = new Set<string>();
-  activeOrder?.items.forEach((l) => {
-    const m = branchMenu.find((mi) => mi.id === l.menuItemId);
-    m?.oftenOrderedWith?.forEach((sid) => suggestedIds.add(sid));
+  const totalDueUsd = totals?.totalUsd ?? 0;
+  const totalDueKhr = totals?.totalKhr ?? 0;
+  const canPollKhqr = shouldPollOrderKhqr({
+    order: activeOrder,
+    branch: activeBranch,
+    offlineMode: state.offlineMode,
+    totalUsd: totalDueUsd,
   });
-  const suggestions = branchMenu.filter(
-    (m) => suggestedIds.has(m.id) && !activeOrder?.items.some((l) => l.menuItemId === m.id)
+
+  const khqrCandidates = useMemo(
+    () =>
+      buildOrderKhqrCandidates({
+        order: activeOrder,
+        branch: activeBranch,
+        totalUsd: totalDueUsd,
+        totalKhr: totalDueKhr,
+      }),
+    [activeOrder, activeBranch, totalDueUsd, totalDueKhr]
   );
+
+  const khqrMd5Key = khqrCandidates.map((c) => c.md5).join(',');
+
+  // Automatic Bakong KHQR callback polling loop for the active order in SellView
+  useEffect(() => {
+    if (!canPollKhqr || !khqrAutoPollEnabled || !activeOrder || khqrCandidates.length === 0) {
+      setKhqrPollStatus('idle');
+      return;
+    }
+
+    const targetOrderId = activeOrder.id;
+    const targetOrderNumber = activeOrder.orderNumber;
+    const targetTableName = activeOrder.tableName;
+    const promoDiscountUsd = activeOrder.promoDiscountUsd;
+    const appliedPromoName = activeOrder.appliedPromoName;
+    const md5List = khqrCandidates.map((c) => c.md5);
+
+    let cancelled = false;
+    let inFlight = false;
+    const controller = new AbortController();
+
+    setKhqrPollStatus('listening');
+
+    const pollBakongCallback = async () => {
+      if (cancelled || inFlight || autoSettledOrdersRef.current.has(targetOrderId)) return;
+      inFlight = true;
+      try {
+        const res = await fetch('/api/bakong/check-transaction', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ md5s: md5List }),
+          signal: controller.signal,
+        });
+        const data = (await res.json()) as BakongCheckTransactionResponse;
+        if (cancelled) return;
+
+        setKhqrLastCheckedAt(
+          new Date().toLocaleTimeString([], {
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            hour12: false,
+          })
+        );
+
+        if (res.ok && data.paid) {
+          const matched = matchPaidBakongResult(khqrCandidates, data, {
+            totalUsd: totalDueUsd,
+            totalKhr: totalDueKhr,
+          });
+          if (matched && !autoSettledOrdersRef.current.has(targetOrderId)) {
+            autoSettledOrdersRef.current.add(targetOrderId);
+            settleOrderPaymentRef.current(targetOrderId, {
+              method: 'KHQR',
+              paidUsd: matched.paidUsd,
+              paidKhr: matched.paidKhr,
+              changeUsd: 0,
+              changeKhr: 0,
+              paymentRef: matched.paymentRef,
+              promoDiscountUsd,
+              appliedPromoName,
+              totalUsd: totalDueUsd,
+              totalKhr: totalDueKhr,
+            });
+            setPayModalOpen(false);
+            setMobileCartOpen(false);
+            setKhqrAutoPaidNotice({
+              orderNumber: targetOrderNumber,
+              tableName: targetTableName,
+              totalUsd: totalDueUsd,
+              paymentRef: matched.paymentRef,
+            });
+          }
+          return;
+        }
+
+        setKhqrPollStatus(res.ok ? 'listening' : 'error');
+      } catch (err) {
+        if (!cancelled && !(err instanceof DOMException && err.name === 'AbortError')) {
+          setKhqrPollStatus('error');
+        }
+      } finally {
+        inFlight = false;
+      }
+    };
+
+    void pollBakongCallback();
+    const intervalId = window.setInterval(() => {
+      void pollBakongCallback();
+    }, 3000);
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+      window.clearInterval(intervalId);
+    };
+  }, [
+    canPollKhqr,
+    khqrAutoPollEnabled,
+    activeOrder?.id,
+    activeOrder?.orderNumber,
+    activeOrder?.tableName,
+    activeOrder?.promoDiscountUsd,
+    activeOrder?.appliedPromoName,
+    khqrMd5Key,
+    khqrCandidates,
+    totalDueUsd,
+    totalDueKhr,
+  ]);
 
   const filteredMenu = branchMenu.filter((item) => {
     const itemType = item.itemType === 'service' ? 'service' : 'product';
@@ -187,9 +346,9 @@ export function SellView() {
     <div className="h-full min-h-0 flex flex-col lg:flex-row overflow-hidden">
       {/* Left Workspace: Tables or Menu */}
       <div className="flex-1 min-w-0 min-h-0 flex flex-col p-4 gap-3 overflow-hidden">
-        {/* Top Sub-switcher + Search */}
+        {/* Top Sub-switcher + Search + Print Last Receipt */}
         <div className="flex flex-wrap items-center justify-between gap-2.5">
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <div className="inline-flex rounded-lg border border-slate-200 bg-white p-0.5 text-xs font-semibold">
               <button
                 type="button"
@@ -214,10 +373,32 @@ export function SellView() {
                 <span>{t.menu}</span>
               </button>
             </div>
+
+            <button
+              type="button"
+              disabled={!lastCompletedOrder}
+              onClick={handlePrintLastReceipt}
+              title={
+                lastCompletedOrder
+                  ? `Print receipt for completed order #${lastCompletedOrder.orderNumber}`
+                  : 'No completed orders yet in this branch'
+              }
+              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700 hover:border-emerald-700 hover:bg-emerald-50/50 hover:text-emerald-900 transition-colors disabled:opacity-45 disabled:pointer-events-none whitespace-nowrap"
+            >
+              <Printer className="h-3.5 w-3.5 text-emerald-700 shrink-0" />
+              <span>Print Last Receipt</span>
+              {lastCompletedOrder && (
+                <span className="tabular-nums font-bold text-emerald-800">
+                  #{lastCompletedOrder.orderNumber}
+                </span>
+              )}
+            </button>
+
+            <SyncStatusToolbarControl />
           </div>
 
           {subTab === 'menu' ? (
-            <div className="relative flex-1 max-w-md">
+            <div className="relative flex-1 min-w-[200px] max-w-md">
               <Search className="h-4 w-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
               <input
                 ref={searchInputRef}
@@ -245,6 +426,38 @@ export function SellView() {
             </div>
           )}
         </div>
+
+        {khqrAutoPaidNotice && (
+          <div
+            role="status"
+            className="flex items-center justify-between gap-2 rounded-xl border border-emerald-300 bg-emerald-50 px-3.5 py-2 text-xs font-medium text-emerald-950"
+          >
+            <span className="flex items-center gap-2">
+              <CheckCircle2 className="h-4 w-4 text-emerald-700 shrink-0" />
+              <span>
+                Order <strong>#{khqrAutoPaidNotice.orderNumber}</strong> ({khqrAutoPaidNotice.tableName}) marked{' '}
+                <strong>Paid</strong> automatically via Bakong KHQR ·{' '}
+                <span className="tabular-nums font-semibold">
+                  ${khqrAutoPaidNotice.totalUsd.toFixed(2)}
+                </span>{' '}
+                · Ref <span className="font-mono">{khqrAutoPaidNotice.paymentRef}</span>
+              </span>
+            </span>
+            <button
+              type="button"
+              onClick={() => setKhqrAutoPaidNotice(null)}
+              className="text-emerald-800 underline text-[11px] shrink-0"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
+
+        {/* Sync Status Conflict / Error / Offline Queue Alert Banner */}
+        <SyncStatusAlertBanner />
+
+        {/* Daily Sales Performance Summary Card */}
+        <DailySalesSummaryCard />
 
         {/* TABLES VIEW */}
         {subTab === 'tables' && (
@@ -813,26 +1026,16 @@ export function SellView() {
                 </div>
               )}
 
-              {/* Often ordered with suggestions */}
-              {suggestions.length > 0 && (
-                <div className="rounded-xl border border-amber-200 bg-amber-50/70 p-2.5">
-                  <div className="text-[11px] font-semibold text-amber-900 mb-1.5">
-                    Often ordered with
-                  </div>
-                  <div className="flex flex-wrap gap-1.5">
-                    {suggestions.slice(0, 3).map((sg) => (
-                      <button
-                        key={sg.id}
-                        type="button"
-                        onClick={() => addItemToOrder(activeOrder.id, sg)}
-                        className="rounded-md border border-amber-300 bg-white px-2 py-1 text-[11px] font-medium text-slate-800 hover:bg-amber-100"
-                      >
-                        + {sg.nameEn} <span className="tabular-nums text-emerald-800">${sg.priceUsd.toFixed(2)}</span>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
+              {/* AI-Powered Suggested Pairings based on historical order patterns */}
+              <SuggestedPairingsCard
+                tenantId={state.tenantId || 'default'}
+                branch={activeBranch}
+                activeOrder={activeOrder}
+                menuItems={state.menuItems}
+                orders={state.orders}
+                language={language}
+                onAddPairing={handleDishClick}
+              />
             </div>
 
             {/* Ticket Footer */}
@@ -845,6 +1048,49 @@ export function SellView() {
                     <div className="text-xs text-slate-500">= {totals.totalKhr.toLocaleString()} ៛</div>
                   </div>
                 </div>
+
+                {khqrCandidates.length > 0 && (
+                  <div
+                    data-khqr-md5={khqrCandidates[0].md5}
+                    className="flex items-center justify-between gap-2 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-[11px]"
+                  >
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <span
+                        className={`h-2 w-2 rounded-full shrink-0 ${
+                          state.offlineMode || !khqrAutoPollEnabled
+                            ? 'bg-slate-300'
+                            : khqrPollStatus === 'error'
+                              ? 'bg-amber-500'
+                              : 'bg-emerald-500 animate-pulse'
+                        }`}
+                      />
+                      <QrCode className="h-3.5 w-3.5 text-red-700 shrink-0" />
+                      <span className="truncate font-medium text-slate-700">
+                        {state.offlineMode
+                          ? 'KHQR auto-poll paused (offline)'
+                          : !khqrAutoPollEnabled
+                            ? 'KHQR auto-poll paused'
+                            : khqrPollStatus === 'error'
+                              ? 'KHQR polling retrying…'
+                              : `Listening KHQR · #ORD-${activeOrder.orderNumber}`}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      {khqrLastCheckedAt && khqrAutoPollEnabled && !state.offlineMode && (
+                        <span className="text-[10px] font-mono tabular-nums text-slate-400">
+                          {khqrLastCheckedAt}
+                        </span>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => setKhqrAutoPollEnabled((v) => !v)}
+                        className="rounded border border-slate-200 px-2 py-0.5 text-[10px] font-semibold text-slate-700 hover:bg-slate-50"
+                      >
+                        {khqrAutoPollEnabled ? 'Pause' : 'Resume'}
+                      </button>
+                    </div>
+                  </div>
+                )}
 
                 <div className="grid grid-cols-2 gap-2">
                   <button

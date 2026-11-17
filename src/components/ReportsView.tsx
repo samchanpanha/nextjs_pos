@@ -2,6 +2,7 @@ import React, { useMemo, useState } from 'react';
 import { BarChart3, Sparkles, Calendar, Send, Clock, Receipt } from 'lucide-react';
 import { usePos } from '../context/PosContext';
 import { roundCurrency, usdToKhr } from '../utils/posMath';
+import { AiForecastWidget } from './AiForecastWidget';
 
 type ReportTab = 'overview' | 'details' | 'ai' | 'forecast' | 'shifts' | 'telegram';
 
@@ -307,6 +308,8 @@ export function ReportsView() {
               </div>
             </div>
           </div>
+
+          <AiForecastWidget />
         </div>
       )}
 
