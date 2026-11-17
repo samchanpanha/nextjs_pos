@@ -1,8 +1,27 @@
-import React, { useState } from 'react';
-import { Tag, Gift, Users, Send, Sparkles, Plus, Ban, Search, Award, History, X, Settings2 } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import {
+  Tag,
+  Gift,
+  Users,
+  Send,
+  Sparkles,
+  Plus,
+  Ban,
+  Search,
+  Award,
+  History,
+  X,
+  Settings2,
+  QrCode,
+  Printer,
+  TrendingUp,
+} from 'lucide-react';
 import { usePos } from '../context/PosContext';
 import type { PromotionRule } from '../utils/posMath';
+import type { MemberCustomer } from '../types/pos';
 import { getNextTierProgress, searchMembers } from '../utils/loyaltyEngine';
+import { buildLoyaltyQrPayload, summarizeLoyaltyProgram } from '../utils/loyaltyQr';
+import { QrCodeBox } from './QrCodeBox';
 
 type PromoSubTab = 'promotions' | 'prepaid' | 'members' | 'campaign';
 
@@ -80,6 +99,15 @@ export function PromotionsCustomersView() {
   const [campLoading, setCampLoading] = useState(false);
   const [campSent, setCampSent] = useState(false);
 
+  // Printable loyalty card sheet (hidden on screen, visible when printing)
+  const [printCardMember, setPrintCardMember] = useState<MemberCustomer | null>(null);
+
+  useEffect(() => {
+    const clearPrintCard = () => setPrintCardMember(null);
+    window.addEventListener('afterprint', clearPrintCard);
+    return () => window.removeEventListener('afterprint', clearPrintCard);
+  }, []);
+
   const handleAddPromo = (e: React.FormEvent) => {
     e.preventDefault();
     if (!promoName.trim()) return;
@@ -123,6 +151,12 @@ export function PromotionsCustomersView() {
     setBuyerPhone('');
   };
 
+  const handlePrintLoyaltyCard = (member: MemberCustomer) => {
+    setPrintCardMember(member);
+    // Give the print-only sheet a tick to mount before opening the dialog.
+    window.setTimeout(() => window.print(), 80);
+  };
+
   const handleDraftCampaign = async () => {
     setCampLoading(true);
     setCampSent(false);
@@ -150,7 +184,12 @@ export function PromotionsCustomersView() {
   };
 
   return (
-    <div className="p-4 sm:p-6 max-w-7xl mx-auto space-y-5">
+    <>
+    <div
+      className={`p-4 sm:p-6 max-w-7xl mx-auto space-y-5 ${
+        printCardMember ? 'no-print' : ''
+      }`}
+    >
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-xl font-bold text-slate-900">Promotions, packs &amp; loyalty</h1>
@@ -440,9 +479,73 @@ export function PromotionsCustomersView() {
         const inspectedMember = selectedMemberId
           ? state.members.find((m) => m.id === selectedMemberId) || null
           : null;
+        const loyaltySummary = summarizeLoyaltyProgram({
+          members: state.members,
+          pointsValuePer100: activeBranch.pointsValuePer100,
+        });
 
         return (
           <div className="space-y-4">
+            {/* Loyalty Points Tracking Overview */}
+            <div className="rounded-xl border border-slate-200 bg-white p-4 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h2 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                  <TrendingUp className="h-4 w-4 text-emerald-800" />
+                  Loyalty points tracking
+                </h2>
+                <span className="text-[11px] text-slate-500">
+                  Members earn {activeBranch.pointsPerDollar} pt per $1 automatically when their
+                  QR is scanned at checkout
+                </span>
+              </div>
+
+              <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
+                <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-3">
+                  <div className="text-[11px] text-slate-500">Active members</div>
+                  <div className="mt-1 text-xl font-bold text-slate-900 tabular-nums">
+                    {loyaltySummary.activeMembers}
+                  </div>
+                  <div className="text-[11px] text-slate-500">
+                    {loyaltySummary.goldMembers} Gold · {loyaltySummary.silverMembers} Silver
+                  </div>
+                </div>
+                <div className="rounded-xl border border-emerald-200 bg-emerald-50/60 p-3">
+                  <div className="text-[11px] text-emerald-800 font-semibold">
+                    Points outstanding
+                  </div>
+                  <div className="mt-1 text-xl font-bold text-emerald-950 tabular-nums">
+                    {loyaltySummary.totalPointsOutstanding.toLocaleString()} pts
+                  </div>
+                  <div className="text-[11px] text-emerald-700">
+                    ≈ ${loyaltySummary.pointsOutstandingValueUsd.toFixed(2)} liability
+                  </div>
+                </div>
+                <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-3">
+                  <div className="text-[11px] text-slate-500">Points issued</div>
+                  <div className="mt-1 text-xl font-bold text-slate-900 tabular-nums">
+                    {loyaltySummary.pointsIssued.toLocaleString()}
+                  </div>
+                  <div className="text-[11px] text-slate-500">
+                    {loyaltySummary.earningVisits} earning visits
+                  </div>
+                </div>
+                <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-3">
+                  <div className="text-[11px] text-slate-500">Points redeemed</div>
+                  <div className="mt-1 text-xl font-bold text-slate-900 tabular-nums">
+                    {loyaltySummary.pointsRedeemed.toLocaleString()}
+                  </div>
+                  <div className="text-[11px] text-slate-500">Free items &amp; discounts</div>
+                </div>
+                <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-3">
+                  <div className="text-[11px] text-slate-500">Lifetime member spend</div>
+                  <div className="mt-1 text-xl font-bold text-slate-900 tabular-nums">
+                    ${loyaltySummary.totalLifetimeSpendUsd.toFixed(2)}
+                  </div>
+                  <div className="text-[11px] text-slate-500">Tracked visits</div>
+                </div>
+              </div>
+            </div>
+
             {/* Loyalty Program Rules + Free-Item Rewards Catalog */}
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
               <div className="lg:col-span-5 rounded-xl border border-slate-200 bg-white p-4 space-y-3">
@@ -671,7 +774,7 @@ export function PromotionsCustomersView() {
                       <th className="py-2 pr-3 font-semibold text-right">Points</th>
                       <th className="py-2 pr-3 font-semibold text-right">Total Spent</th>
                       <th className="py-2 pr-3 font-semibold text-right">Last Visit</th>
-                      <th className="py-2 font-semibold text-right">Profile &amp; History</th>
+                      <th className="py-2 font-semibold text-right">Card &amp; Profile</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
@@ -700,14 +803,26 @@ export function PromotionsCustomersView() {
                         </td>
                         <td className="py-2.5 pr-3 text-right text-slate-500">{m.lastVisit}</td>
                         <td className="py-2.5 text-right">
-                          <button
-                            type="button"
-                            onClick={() => setSelectedMemberId(m.id)}
-                            className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-100"
-                          >
-                            <History className="h-3 w-3" />
-                            Profile ({m.loyaltyHistory?.length || 0})
-                          </button>
+                          <div className="inline-flex items-center justify-end gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => setSelectedMemberId(m.id)}
+                              aria-label={`Loyalty QR card for ${m.name}`}
+                              title="Loyalty QR card"
+                              className="inline-flex items-center gap-1 rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[11px] font-semibold text-emerald-800 hover:bg-emerald-100"
+                            >
+                              <QrCode className="h-3 w-3" />
+                              Card
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setSelectedMemberId(m.id)}
+                              className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-100"
+                            >
+                              <History className="h-3 w-3" />
+                              Profile ({m.loyaltyHistory?.length || 0})
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     ))}
@@ -747,7 +862,10 @@ export function PromotionsCustomersView() {
                       </div>
                       <button
                         type="button"
-                        onClick={() => setSelectedMemberId(null)}
+                        onClick={() => {
+                          setSelectedMemberId(null);
+                          setPrintCardMember(null);
+                        }}
                         aria-label="Close customer profile"
                         className="rounded-lg p-1.5 text-slate-500 hover:bg-slate-100"
                       >
@@ -756,6 +874,42 @@ export function PromotionsCustomersView() {
                     </div>
 
                     <div className="flex-1 overflow-y-auto p-5 space-y-4">
+                      {/* Loyalty QR Card */}
+                      <div className="flex flex-wrap items-center gap-4 rounded-xl border border-emerald-200 bg-emerald-50/50 p-4">
+                        <QrCodeBox
+                          value={buildLoyaltyQrPayload(inspectedMember)}
+                          size={124}
+                          label={`Loyalty QR for ${inspectedMember.name}`}
+                        />
+                        <div className="min-w-[220px] flex-1">
+                          <div className="text-[11px] font-bold uppercase tracking-wide text-emerald-800">
+                            Loyalty QR card
+                          </div>
+                          <div className="mt-1 text-sm font-bold text-slate-900">
+                            {inspectedMember.name}
+                            <span className="ml-2 rounded bg-amber-100 px-2 py-0.5 text-[11px] font-bold text-amber-900">
+                              {inspectedMember.tier}
+                            </span>
+                          </div>
+                          <div className="font-mono text-xs text-slate-500">
+                            {inspectedMember.phone}
+                          </div>
+                          <p className="mt-1.5 text-[11px] leading-relaxed text-slate-600">
+                            The customer shows this QR at checkout. Scanning it attaches the
+                            member and points are added automatically from the bill total (
+                            {activeBranch.pointsPerDollar} pt per $1).
+                          </p>
+                          <button
+                            type="button"
+                            onClick={() => handlePrintLoyaltyCard(inspectedMember)}
+                            className="mt-2 inline-flex items-center gap-1.5 rounded-lg border border-emerald-300 bg-white px-3 py-1.5 text-[11px] font-semibold text-emerald-800 hover:bg-emerald-50"
+                          >
+                            <Printer className="h-3.5 w-3.5" />
+                            Print loyalty card
+                          </button>
+                        </div>
+                      </div>
+
                       <div className="grid grid-cols-3 gap-3">
                         <div className="rounded-xl border border-emerald-200 bg-emerald-50/70 p-3">
                           <div className="text-[11px] text-emerald-800 font-semibold">
@@ -843,7 +997,8 @@ export function PromotionsCustomersView() {
                         </h4>
                         {history.length === 0 ? (
                           <div className="rounded-xl border border-dashed border-slate-200 p-6 text-center text-xs text-slate-400">
-                            No points transactions recorded yet. Attach this member at checkout to start earning points.
+                            No points transactions recorded yet. Scan this member's loyalty QR at
+                            checkout to start earning points automatically.
                           </div>
                         ) : (
                           <div className="rounded-xl border border-slate-200 divide-y divide-slate-100 max-h-60 overflow-y-auto">
@@ -963,5 +1118,50 @@ export function PromotionsCustomersView() {
         </div>
       )}
     </div>
+
+    {/* Print-only loyalty card sheet */}
+    {printCardMember && (
+      <div className="hidden print:block">
+        <div
+          style={{
+            width: 360,
+            border: '2px solid #065f46',
+            borderRadius: 14,
+            padding: 18,
+            fontFamily: 'system-ui, sans-serif',
+            color: '#0f172a',
+          }}
+        >
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <strong style={{ fontSize: 15 }}>{activeBranch.name}</strong>
+            <span style={{ fontSize: 11, color: '#065f46', fontWeight: 700 }}>
+              LOYALTY CARD
+            </span>
+          </div>
+          <div style={{ marginTop: 12, display: 'flex', justifyContent: 'center' }}>
+            <QrCodeBox
+              value={buildLoyaltyQrPayload(printCardMember)}
+              size={190}
+              label={`Loyalty QR for ${printCardMember.name}`}
+            />
+          </div>
+          <div style={{ marginTop: 12, fontSize: 14, fontWeight: 700 }}>
+            {printCardMember.name}
+          </div>
+          <div style={{ fontSize: 12, fontFamily: 'monospace', color: '#475569' }}>
+            {printCardMember.phone}
+          </div>
+          <div style={{ marginTop: 6, fontSize: 11, color: '#334155' }}>
+            {printCardMember.tier} · {printCardMember.points.toLocaleString()} pts
+          </div>
+          <div style={{ marginTop: 10, fontSize: 10, color: '#64748b' }}>
+            Show this QR at checkout to earn {activeBranch.pointsPerDollar} point
+            {activeBranch.pointsPerDollar === 1 ? '' : 's'} per $1 spent. Points are added
+            automatically to your balance.
+          </div>
+        </div>
+      </div>
+    )}
+    </>
   );
 }
