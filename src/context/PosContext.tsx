@@ -299,6 +299,7 @@ interface PosContextValue {
   addPettyCash: (entry: Omit<PettyCashEntry, 'id' | 'createdAt' | 'actorName'>) => void;
   closeShift: (countedUsd: number, countedKhr: number, managerPin?: string) => boolean;
   addIngredient: (ing: Omit<Ingredient, 'id' | 'branchId' | 'used7d'>) => void;
+  setIngredientPreferredSupplier: (ingredientId: string, supplierId: string) => void;
   recordIngredientPurchase: (ingredientId: string, qtyAdded: number, totalCostUsd: number) => void;
   recordIngredientWaste: (ingredientId: string, qtyWasted: number, note: string) => void;
   recordStockCount: (ingredientId: string, actualQty: number) => void;
@@ -369,6 +370,14 @@ interface PosContextValue {
     lines: Omit<PurchaseOrderLine, 'id' | 'receivedQty' | 'lineTotalUsd'>[];
   }) => PurchaseOrder | null;
   autoDraftLowStockPurchaseOrders: () => number;
+  logAutoRestockDraftSent: (params: {
+    poNumber: string;
+    supplierId: string;
+    supplierName: string;
+    channel: 'email' | 'pdf';
+    recipient?: string;
+    totalUsd: number;
+  }) => void;
   updatePurchaseOrderStatus: (poId: string, status: 'sent' | 'cancelled') => void;
   receivePurchaseOrder: (params: {
     poId: string;
@@ -3015,6 +3024,19 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     setState((prev) => ({ ...prev, ingredients: [newIng, ...prev.ingredients] }));
   };
 
+  const setIngredientPreferredSupplier: PosContextValue['setIngredientPreferredSupplier'] = (
+    ingredientId,
+    supplierId
+  ) => {
+    const clean = supplierId.trim();
+    setState((prev) => ({
+      ...prev,
+      ingredients: prev.ingredients.map((ing) =>
+        ing.id === ingredientId ? { ...ing, preferredSupplierId: clean || undefined } : ing
+      ),
+    }));
+  };
+
   const recordIngredientPurchase = (ingredientId: string, qtyAdded: number, totalCostUsd: number) => {
     setState((prev) => {
       const ing = prev.ingredients.find((i) => i.id === ingredientId);
@@ -4301,6 +4323,23 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     return proposals.length;
   };
 
+  const logAutoRestockDraftSent: PosContextValue['logAutoRestockDraftSent'] = (params) => {
+    if (isSuperAdmin(activeStaff)) return;
+    const detail = [
+      params.poNumber,
+      params.channel.toUpperCase(),
+      params.supplierName,
+      `$${params.totalUsd.toFixed(2)}`,
+      params.recipient ? `→ ${params.recipient}` : '',
+    ]
+      .filter(Boolean)
+      .join(' · ');
+    setState((prev) => ({
+      ...prev,
+      auditLogs: [appendAudit(prev, 'Auto-Restock draft sent', detail), ...prev.auditLogs],
+    }));
+  };
+
   const updatePurchaseOrderStatus: PosContextValue['updatePurchaseOrderStatus'] = (
     poId,
     status
@@ -4894,6 +4933,7 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     addPettyCash,
     closeShift,
     addIngredient,
+    setIngredientPreferredSupplier,
     recordIngredientPurchase,
     recordIngredientWaste,
     recordStockCount,
@@ -4931,6 +4971,7 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     deleteSupplier,
     createPurchaseOrder,
     autoDraftLowStockPurchaseOrders,
+    logAutoRestockDraftSent,
     updatePurchaseOrderStatus,
     receivePurchaseOrder,
     payPurchaseOrder,

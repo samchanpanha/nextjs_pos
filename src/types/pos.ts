@@ -319,6 +319,8 @@ export interface Ingredient {
   minLevel: number;
   used7d: number;
   avgCostUsd: number;
+  /** Optional supplier chosen for restock drafts / purchase orders. */
+  preferredSupplierId?: string;
 }
 
 export interface Recipe {

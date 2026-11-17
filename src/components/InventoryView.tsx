@@ -74,6 +74,7 @@ export function InventoryView() {
     saveRecipe,
     saveMenuItem,
     aiStockAlerts,
+    setIngredientPreferredSupplier,
   } = usePos();
 
   const [subTab, setSubTab] = useState<StockSubTab>('stock');
@@ -109,6 +110,14 @@ export function InventoryView() {
         return a.nameEn.localeCompare(b.nameEn);
       });
   }, [state.ingredients, activeBranch.id]);
+
+  const branchSuppliers = useMemo(
+    () =>
+      (state.suppliers || []).filter(
+        (s) => s.active && (s.branchId === activeBranch.id || s.branchId === 'all')
+      ),
+    [state.suppliers, activeBranch.id]
+  );
 
   const totalStockValue = useMemo(
     () =>
@@ -655,6 +664,7 @@ export function InventoryView() {
                   <th className="py-2 pr-3 font-semibold text-right">Min Level</th>
                   <th className="py-2 pr-3 font-semibold text-right">Avg Cost</th>
                   <th className="py-2 pr-3 font-semibold text-right">Stock Value</th>
+                  <th className="py-2 pr-3 font-semibold">Preferred Supplier</th>
                   <th className="py-2 font-semibold text-right">Actions</th>
                 </tr>
               </thead>
@@ -680,6 +690,21 @@ export function InventoryView() {
                       </td>
                       <td className="py-2.5 pr-3 text-right font-semibold tabular-nums">
                         ${(ing.onHand * ing.avgCostUsd).toFixed(2)}
+                      </td>
+                      <td className="py-2.5 pr-3">
+                        <select
+                          aria-label={`Preferred supplier for ${ing.nameEn}`}
+                          value={ing.preferredSupplierId || ''}
+                          onChange={(e) => setIngredientPreferredSupplier(ing.id, e.target.value)}
+                          className="max-w-[11rem] rounded border border-slate-300 bg-white px-1.5 py-1 text-[11px] text-slate-700"
+                        >
+                          <option value="">Auto-match</option>
+                          {branchSuppliers.map((s) => (
+                            <option key={s.id} value={s.id}>
+                              {s.name}
+                            </option>
+                          ))}
+                        </select>
                       </td>
                       <td className="py-2.5 text-right space-x-1.5 whitespace-nowrap">
                         <button

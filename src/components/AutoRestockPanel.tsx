@@ -53,7 +53,8 @@ function urgencyBadgeClass(urgency: AutoRestockSupplierDraft['lines'][number]['u
 }
 
 export function AutoRestockPanel({ onOpenMonitor }: AutoRestockPanelProps) {
-  const { state, activeBranch, notify, createPurchaseOrder } = usePos();
+  const { state, activeBranch, notify, createPurchaseOrder, logAutoRestockDraftSent } =
+    usePos();
 
   const [includeWarnings, setIncludeWarnings] = useState(false);
   const [bufferDays, setBufferDays] = useState(7);
@@ -223,9 +224,21 @@ export function AutoRestockPanel({ onOpenMonitor }: AutoRestockPanelProps) {
     setSupplierOverrides((prev) => ({ ...prev, [ingredientId]: supplierId }));
   };
 
+  const handleLogDraftSent = (po: AutoRestockSupplierDraft, channel: 'email' | 'pdf') => {
+    logAutoRestockDraftSent({
+      poNumber: po.poNumber,
+      supplierId: po.supplierId,
+      supplierName: po.supplierName,
+      channel,
+      recipient: po.supplierEmail,
+      totalUsd: po.totalUsd,
+    });
+  };
+
   const handleCopyEmail = async (po: AutoRestockSupplierDraft) => {
     try {
       await navigator.clipboard.writeText(po.email.body);
+      handleLogDraftSent(po, 'email');
       setCopiedKey(po.poNumber);
       notify('Purchase order email body copied to clipboard.', 'success');
       window.setTimeout(() => setCopiedKey((current) => (current === po.poNumber ? null : current)), 2000);
@@ -498,6 +511,7 @@ export function AutoRestockPanel({ onOpenMonitor }: AutoRestockPanelProps) {
               <div className="flex flex-wrap items-center gap-2">
                 <a
                   href={buildMailtoUrl(po.email)}
+                  onClick={() => handleLogDraftSent(po, 'email')}
                   className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-800 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-900"
                 >
                   <Send className="h-3.5 w-3.5" />
@@ -677,7 +691,10 @@ export function AutoRestockPanel({ onOpenMonitor }: AutoRestockPanelProps) {
               <div className="flex items-center gap-2">
                 <button
                   type="button"
-                  onClick={() => window.print()}
+                  onClick={() => {
+                    handleLogDraftSent(printTarget, 'pdf');
+                    window.print();
+                  }}
                   className="inline-flex items-center gap-1 rounded-lg bg-emerald-800 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-900"
                 >
                   <Printer className="h-3.5 w-3.5" /> Print / Save as PDF

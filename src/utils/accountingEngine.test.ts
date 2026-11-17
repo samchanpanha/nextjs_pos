@@ -15,6 +15,7 @@ import {
   computeTrialBalance,
   createDefaultChartOfAccounts,
   finalizeBalancedJournal,
+  matchIngredientSupplier,
 } from './accountingEngine';
 import type {
   Ingredient,
@@ -350,4 +351,57 @@ test('Double-Entry Accounting Engine: POS sales, PO GRNs, Vendor WHT Payments & 
   assert.equal(drafts[0].supplierId, 'sup_1');
   assert.equal(drafts[0].lines[0].ingredientId, 'ing_coffee');
   assert.ok(drafts[0].lines[0].orderedQty >= 3); // 1500 * 2.5 = 3750 - 800 = 2950g -> 3 kg
+});
+
+test('matchIngredientSupplier honors a preferred supplier before category heuristics', () => {
+  const suppliers: Supplier[] = [
+    {
+      id: 'sup_coffee',
+      branchId: 'b1',
+      name: 'Coffee Co',
+      category: 'Coffee & Tea',
+      contactName: '',
+      phone: '',
+      paymentTerms: 'net_7',
+      active: true,
+      createdAt: '2026-11-01T00:00:00Z',
+    },
+    {
+      id: 'sup_fresh',
+      branchId: 'b1',
+      name: 'Fresh Co',
+      category: 'Fresh Produce',
+      contactName: '',
+      phone: '',
+      paymentTerms: 'net_7',
+      active: true,
+      createdAt: '2026-11-01T00:00:00Z',
+    },
+  ];
+  const coffee: Ingredient = {
+    id: 'i1',
+    branchId: 'b1',
+    nameEn: 'Coffee beans',
+    nameKh: '',
+    unit: 'g',
+    purchaseUnit: '1kg',
+    purchaseUnitSize: 1000,
+    onHand: 100,
+    minLevel: 200,
+    used7d: 0,
+    avgCostUsd: 0.01,
+  };
+  const beef: Ingredient = { ...coffee, id: 'i2', nameEn: 'Beef' };
+
+  assert.equal(matchIngredientSupplier(coffee, suppliers)?.id, 'sup_coffee');
+  assert.equal(matchIngredientSupplier(beef, suppliers)?.id, 'sup_fresh');
+  assert.equal(
+    matchIngredientSupplier({ ...coffee, preferredSupplierId: 'sup_fresh' }, suppliers)?.id,
+    'sup_fresh'
+  );
+  assert.equal(
+    matchIngredientSupplier({ ...coffee, preferredSupplierId: 'sup_missing' }, suppliers)?.id,
+    'sup_coffee'
+  );
+  assert.equal(matchIngredientSupplier(coffee, []), null);
 });

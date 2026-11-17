@@ -893,6 +893,13 @@ export function matchIngredientSupplier(
   suppliers: Supplier[]
 ): Supplier | null {
   if (suppliers.length === 0) return null;
+
+  // An explicitly preferred supplier always wins (when still eligible).
+  if (ingredient.preferredSupplierId) {
+    const preferred = suppliers.find((s) => s.id === ingredient.preferredSupplierId);
+    if (preferred) return preferred;
+  }
+
   const lower = ingredient.nameEn.toLowerCase();
   if (lower.includes('coffee') || lower.includes('bean') || lower.includes('tea')) {
     return (
