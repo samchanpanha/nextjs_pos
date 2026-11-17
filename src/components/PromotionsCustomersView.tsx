@@ -21,6 +21,12 @@ import type { PromotionRule } from '../utils/posMath';
 import type { MemberCustomer } from '../types/pos';
 import { getNextTierProgress, searchMembers } from '../utils/loyaltyEngine';
 import { buildLoyaltyQrPayload, summarizeLoyaltyProgram } from '../utils/loyaltyQr';
+import {
+  computeMemberExpiry,
+  EXPIRY_WARNING_WINDOW_DAYS,
+  POINTS_EXPIRY_DAYS,
+  summarizeLoyaltyExpiry,
+} from '../utils/loyaltyExpiry';
 import { QrCodeBox } from './QrCodeBox';
 
 type PromoSubTab = 'promotions' | 'prepaid' | 'members' | 'campaign';
@@ -39,6 +45,7 @@ export function PromotionsCustomersView() {
     saveLoyaltyReward,
     toggleLoyaltyReward,
     updateLoyaltyRules,
+    expireLoyaltyPoints,
   } = usePos();
 
   const [subTab, setSubTab] = useState<PromoSubTab>('promotions');
@@ -483,6 +490,10 @@ export function PromotionsCustomersView() {
           members: state.members,
           pointsValuePer100: activeBranch.pointsValuePer100,
         });
+        const expirySummary = summarizeLoyaltyExpiry(state.members, {
+          referenceDate: new Date().toISOString().slice(0, 10),
+          windowDays: EXPIRY_WARNING_WINDOW_DAYS,
+        });
 
         return (
           <div className="space-y-4">
@@ -518,6 +529,8 @@ export function PromotionsCustomersView() {
                   </div>
                   <div className="text-[11px] text-emerald-700">
                     ≈ ${loyaltySummary.pointsOutstandingValueUsd.toFixed(2)} liability
+                    {expirySummary.expiringPoints > 0 &&
+                      ` · ${expirySummary.expiringPoints.toLocaleString()} pts expire ≤${EXPIRY_WARNING_WINDOW_DAYS}d`}
                   </div>
                 </div>
                 <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-3">
@@ -611,6 +624,23 @@ export function PromotionsCustomersView() {
                     className="rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white hover:bg-slate-800"
                   >
                     Save Rules
+                  </button>
+                </div>
+
+                <div className="flex items-center justify-between gap-2 pt-2 border-t border-slate-100">
+                  <span className="text-[11px] text-slate-500">
+                    Rolling {POINTS_EXPIRY_DAYS}-day expiry
+                    {expirySummary.expiredPoints > 0
+                      ? ` · ${expirySummary.expiredPoints.toLocaleString()} pts ready to expire`
+                      : ` · ${expirySummary.expiringPoints.toLocaleString()} pts expire within ${EXPIRY_WARNING_WINDOW_DAYS}d`}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => expireLoyaltyPoints()}
+                    disabled={expirySummary.expiredPoints === 0}
+                    className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-semibold text-amber-900 hover:bg-amber-100 disabled:opacity-50"
+                  >
+                    Run expiry sweep
                   </button>
                 </div>
               </div>
@@ -926,6 +956,19 @@ export function PromotionsCustomersView() {
                               activeBranch.pointsValuePer100
                             ).toFixed(2)}
                           </div>
+                          {(() => {
+                            const exp = computeMemberExpiry(inspectedMember, {
+                              referenceDate: new Date().toISOString().slice(0, 10),
+                              windowDays: EXPIRY_WARNING_WINDOW_DAYS,
+                            });
+                            if (exp.expiringPoints <= 0) return null;
+                            return (
+                              <div className="text-[11px] text-amber-700 mt-0.5">
+                                {exp.expiringPoints.toLocaleString()} pts expire by{' '}
+                                {exp.nextExpiryDate}
+                              </div>
+                            );
+                          })()}
                         </div>
 
                         <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">

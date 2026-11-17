@@ -144,6 +144,10 @@ import {
   removeLoyaltyRewardLine,
   settleMemberLoyalty,
 } from '../utils/loyaltyEngine';
+import {
+  buildLoyaltyExpiryAdjustments,
+  POINTS_EXPIRY_DAYS,
+} from '../utils/loyaltyExpiry';
 
 const STORAGE_KEY = 'xaiwork_pos_state_v1';
 const TENANTS_STORAGE_KEY = 'xaiwork_pos_tenants_v1';
@@ -218,6 +222,7 @@ interface PosContextValue {
   voidOrder: (orderId: string, reason: string, managerPin: string) => boolean;
   addLoyaltyMember: (params: { name: string; phone: string; initialPoints?: number }) => LoyaltyMember | null;
   adjustMemberPoints: (memberId: string, delta: number, reason: string) => boolean;
+  expireLoyaltyPoints: (opts?: { referenceDate?: string; expiryDays?: number }) => number;
   saveLoyaltyReward: (reward: Omit<LoyaltyReward, 'id' | 'branchId'> & { id?: string }) => void;
   toggleLoyaltyReward: (rewardId: string) => void;
   updateLoyaltyRules: (
@@ -3340,6 +3345,53 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     return true;
   };
 
+  const expireLoyaltyPoints: PosContextValue['expireLoyaltyPoints'] = (opts) => {
+    if (!hasCurrentPermission('promotion') && !canEditSettings(activeStaff, state.ownerPermissions)) {
+      notify('Permission required to run the points expiry sweep.', 'warning');
+      return 0;
+    }
+    const referenceDate = opts?.referenceDate || new Date().toISOString().slice(0, 10);
+    const expiryDays = opts?.expiryDays ?? POINTS_EXPIRY_DAYS;
+    const adjustments = buildLoyaltyExpiryAdjustments(state.members, {
+      referenceDate,
+      expiryDays,
+    });
+    const totalExpired = adjustments.reduce((sum, adj) => sum + adj.points, 0);
+    if (adjustments.length === 0 || totalExpired <= 0) {
+      notify('No loyalty points have expired yet.', 'info');
+      return 0;
+    }
+
+    const nowIso = new Date().toISOString();
+    setState((prev) => ({
+      ...prev,
+      members: prev.members.map((m) => {
+        const adj = adjustments.find((a) => a.memberId === m.id);
+        if (!adj || adj.points <= 0) return m;
+        const nextBalance = Math.max(0, m.points - adj.points);
+        const tx: LoyaltyTransaction = {
+          id: `ltx_exp_${m.id}_${Date.now()}`,
+          memberId: m.id,
+          type: 'adjust',
+          pointsDelta: -adj.points,
+          balanceAfter: nextBalance,
+          description: adj.description,
+          createdAt: nowIso,
+        };
+        return {
+          ...m,
+          points: nextBalance,
+          loyaltyHistory: [tx, ...(m.loyaltyHistory || [])].slice(0, 100),
+        };
+      }),
+    }));
+    notify(
+      `Expired ${totalExpired.toLocaleString()} pts across ${adjustments.length} member(s).`,
+      'success'
+    );
+    return adjustments.length;
+  };
+
   const saveLoyaltyReward: PosContextValue['saveLoyaltyReward'] = (reward) => {
     const cleanName = reward.name.trim();
     const cost = Math.max(10, Math.round(reward.pointsCost));
@@ -4792,6 +4844,7 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     voidOrder,
     addLoyaltyMember,
     adjustMemberPoints,
+    expireLoyaltyPoints,
     saveLoyaltyReward,
     toggleLoyaltyReward,
     updateLoyaltyRules,
