@@ -31,6 +31,7 @@ import {
   saveOfflineTenantCache,
   type SyncConflictInfo,
 } from '../utils/syncStatus';
+import { routeIncomingQrOrder } from '../utils/qrAutoRouting';
 import {
   cloneBranchResources,
   createSeedState,
@@ -248,7 +249,9 @@ interface PosContextValue {
     item: MenuItem,
     optionLabel?: string,
     deltaUsd?: number,
-    orderedBy?: string
+    orderedBy?: string,
+    note?: string,
+    qty?: number
   ) => void;
   updateOrderItemQty: (orderId: string, lineId: string, delta: number) => void;
   updateOrderItemNote: (orderId: string, lineId: string, note: string) => void;
@@ -309,7 +312,17 @@ interface PosContextValue {
   importMenuItems: (
     items: { nameEn: string; nameKh: string; nameVi: string; category: string; priceUsd: number; station: 'kitchen' | 'bar' }[]
   ) => void;
-  saveTable: (table: { id?: string; name: string; area: PosTable['area']; seats: number }) => void;
+  saveTable: (table: {
+    id?: string;
+    name: string;
+    area: PosTable['area'];
+    seats: number;
+    gridCol?: number;
+    gridRow?: number;
+    qrCodeSlug?: string;
+    qrEnabled?: boolean;
+    qrAssignedAt?: string;
+  }) => void;
   deleteTable: (tableId: string) => void;
   togglePromotion: (promoId: string) => void;
   addPromotion: (promo: Omit<PromotionRule, 'id'>) => void;
@@ -958,10 +971,22 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
       } catch (err) {
         if (!active) return;
         hydratedFromSqliteRef.current = true;
-        setCloudStatus('error');
-        setSyncErrorMessage(
-          err instanceof Error ? err.message : 'Main SQLite server unreachable on startup.'
+        const offlineSnapshot = loadOfflineTenantCache(
+          latestStateRef.current.tenantId || activeTenantId
         );
+        if (offlineSnapshot?.state) {
+          skipSqlitePushRef.current = true;
+          setState(offlineSnapshot.state);
+        }
+        if (typeof navigator !== 'undefined' && !navigator.onLine) {
+          setCloudStatus('synced');
+          setSyncErrorMessage(null);
+        } else {
+          setCloudStatus('error');
+          setSyncErrorMessage(
+            err instanceof Error ? err.message : 'Main SQLite server unreachable on startup.'
+          );
+        }
       } finally {
         if (active) setAuthLoading(false);
       }
@@ -969,13 +994,14 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     return () => {
       active = false;
     };
-  }, [applyServerSessionPayload]);
+  }, [activeTenantId, applyServerSessionPayload]);
 
   // Browser online/offline connectivity listener
   useEffect(() => {
     const handleOnline = () => {
       setNetworkOnline(true);
       networkOnlineRef.current = true;
+      setSyncErrorMessage(null);
       if (!latestStateRef.current.offlineMode && !syncConflictRef.current) {
         const snapshot = latestStateRef.current;
         saveQueueRef.current = saveQueueRef.current.then(() =>
@@ -1712,8 +1738,12 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     item: MenuItem,
     optionLabel?: string,
     deltaUsd = 0,
-    orderedBy?: string
+    orderedBy?: string,
+    note?: string,
+    qty = 1
   ) => {
+    const safeQty = Math.max(1, Math.round(qty || 1));
+    const cleanNote = note?.trim() || undefined;
     setState((prev) => {
       const branch = prev.branches.find((b) => b.id === prev.activeBranchId) || prev.branches[0];
       const orders = prev.orders.map((ord) => {
@@ -1725,12 +1755,13 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
             !l.voided &&
             l.menuItemId === item.id &&
             (l.optionLabel || '') === (optionLabel || '') &&
-            (l.orderedBy || '') === (orderedBy || '')
+            (l.orderedBy || '') === (orderedBy || '') &&
+            (l.note || '') === (cleanNote || '')
         );
         let nextItems: OrderLineItem[];
         if (existingDraft) {
           nextItems = ord.items.map((l) =>
-            l.id === existingDraft.id ? { ...l, qty: l.qty + 1 } : l
+            l.id === existingDraft.id ? { ...l, qty: l.qty + safeQty } : l
           );
         } else {
           const newLine: OrderLineItem = {
@@ -1740,9 +1771,10 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
             nameKh: item.nameKh,
             nameVi: item.nameVi,
             unitPriceUsd,
-            qty: 1,
+            qty: safeQty,
             station: item.station,
             category: item.category,
+            note: cleanNote,
             optionLabel,
             orderedBy,
             round: ord.currentRound,
@@ -2514,78 +2546,43 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
   };
 
   const submitGuestQrOrder: PosContextValue['submitGuestQrOrder'] = (payload) => {
-    const num = state.nextOrderNumber;
-    const qrItem: QrIncomingOrder = {
-      ...payload,
-      id: `qr_${Date.now()}`,
-      createdAt: new Date().toISOString(),
-      status: activeBranch.qrMode === 'auto' ? 'accepted' : 'pending',
-    };
+    const nowIso = new Date().toISOString();
+    const qrId = `qr_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`;
+    const orderId = `ord_qr_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`;
 
-    if (activeBranch.qrMode === 'auto') {
-      const ordId = `ord_qr_${Date.now()}`;
-      const lines: OrderLineItem[] = payload.items.map((it, idx) => ({
-        id: `oi_qr_${Date.now()}_${idx}`,
-        menuItemId: it.menuItemId,
-        nameEn: it.nameEn,
-        nameKh: it.nameKh,
-        nameVi: it.nameVi,
-        unitPriceUsd: it.unitPriceUsd,
-        qty: it.qty,
-        station: it.station,
-        category: it.category,
-        optionLabel: it.optionLabel,
-        orderedBy: it.orderedBy,
-        round: 1,
-        sentToKitchen: true,
-        kdsStatus: 'new',
-      }));
-      const ord = recomputeOrderTotals(
-        {
-          id: ordId,
-          branchId: payload.branchId,
-          orderNumber: num,
-          tableId: payload.tableId,
-          tableName: payload.tableName,
-          channel: payload.channel,
-          status: 'sent',
-          guests: 1,
-          items: lines,
-          currentRound: 1,
-          manualDiscountPercent: 0,
-          manualDiscountUsd: 0,
-          promoDiscountUsd: 0,
-          pointsRedeemed: 0,
-          memberPhone: payload.phone,
-          depositAppliedUsd: 0,
-          totalUsd: 0,
-          totalKhr: 0,
-          paidUsd: 0,
-          paidKhr: 0,
-          changeUsd: 0,
-          changeKhr: 0,
-          cashierName: 'QR Self-Order',
-          sourceQrId: qrItem.id,
-          kdsSubmittedAt: new Date().toISOString(),
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-        },
-        activeBranch
+    const preview = routeIncomingQrOrder({
+      state,
+      payload,
+      qrId,
+      orderId,
+      nowIso,
+    });
+
+    setState((prev) => {
+      const next = routeIncomingQrOrder({
+        state: prev,
+        payload,
+        qrId,
+        orderId,
+        nowIso,
+      });
+      if (next.order) {
+        syncOrderCloud(next.order, prev.offlineMode);
+      }
+      if (next.tableUpdated) {
+        syncTableCloud(next.tableUpdated, prev.offlineMode);
+      }
+      return next.state;
+    });
+
+    if (preview.autoRouted) {
+      notify(
+        `QR Order #${preview.assignedOrderNumber} (${payload.tableName}) routed to Kitchen Display`,
+        'info'
       );
-      setState((prev) => ({
-        ...prev,
-        nextOrderNumber: prev.nextOrderNumber + 1,
-        orders: [ord, ...prev.orders],
-        qrQueue: [qrItem, ...prev.qrQueue],
-      }));
-    } else {
-      setState((prev) => ({
-        ...prev,
-        nextOrderNumber: prev.nextOrderNumber + 1,
-        qrQueue: [qrItem, ...prev.qrQueue],
-      }));
     }
-    return num;
+
+    return preview.assignedOrderNumber;
   };
 
   const acceptQrOrder = (qrId: string) => {
@@ -3255,6 +3252,11 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
         area: table.area,
         seats: table.seats,
         status: 'free',
+        gridCol: table.gridCol,
+        gridRow: table.gridRow,
+        qrCodeSlug: table.qrCodeSlug,
+        qrEnabled: table.qrEnabled ?? true,
+        qrAssignedAt: table.qrAssignedAt,
       };
       const exists = prev.tables.some((t) => t.id === id);
       return {

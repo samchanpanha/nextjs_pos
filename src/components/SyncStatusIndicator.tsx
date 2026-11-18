@@ -6,11 +6,19 @@ import {
   CloudOff,
   Database,
   GitCompareArrows,
+  HardDrive,
   RefreshCw,
   WifiOff,
   X,
 } from 'lucide-react';
 import { usePos } from '../context/PosContext';
+import {
+  formatOfflineCacheBadge,
+  getOfflineCacheSnapshot,
+  refreshOfflineCacheStats,
+  subscribeOfflineCacheStatus,
+  triggerServiceWorkerUpdate,
+} from '../utils/offlineCache';
 import { computeSyncStatusSummary } from '../utils/syncStatus';
 
 export function useSellSyncStatus() {
@@ -80,10 +88,20 @@ export function SyncStatusToolbarControl() {
 
   const [open, setOpen] = useState(false);
   const [busyAction, setBusyAction] = useState<'retry' | 'force' | 'pull' | null>(null);
+  const [cacheSnapshot, setCacheSnapshot] = useState(() => getOfflineCacheSnapshot());
   const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
+    const unsub = subscribeOfflineCacheStatus(() => {
+      setCacheSnapshot(getOfflineCacheSnapshot());
+    });
+    void refreshOfflineCacheStats();
+    return unsub;
+  }, []);
+
+  useEffect(() => {
     if (!open) return;
+    void refreshOfflineCacheStats();
     const handleOutside = (e: MouseEvent) => {
       if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
         setOpen(false);
@@ -99,6 +117,8 @@ export function SyncStatusToolbarControl() {
       window.removeEventListener('keydown', handleEsc);
     };
   }, [open]);
+
+  const cacheBadge = useMemo(() => formatOfflineCacheBadge(cacheSnapshot), [cacheSnapshot]);
 
   const handleRetry = async () => {
     setBusyAction('retry');
@@ -181,7 +201,7 @@ export function SyncStatusToolbarControl() {
           role="region"
           aria-label="Sync Status Details"
           data-testid="sell-sync-status-panel"
-          className="fixed inset-x-3 top-24 sm:absolute sm:inset-x-auto sm:left-0 sm:top-full sm:mt-2 sm:w-[380px] max-w-[calc(100vw-1.5rem)] z-40 rounded-xl border border-slate-200 bg-white shadow-xl p-3.5 space-y-3"
+          className="fixed inset-x-3 top-24 sm:absolute sm:inset-x-auto sm:left-0 sm:top-full sm:mt-2 sm:w-[390px] max-w-[calc(100vw-1.5rem)] z-40 rounded-xl border border-slate-200 bg-white shadow-xl p-3.5 space-y-3"
         >
           <div className="flex items-start justify-between gap-2">
             <div>
@@ -204,51 +224,85 @@ export function SyncStatusToolbarControl() {
           </div>
 
           {/* Connection & Version Diagnostics */}
-          <div className="grid grid-cols-3 gap-1.5 rounded-lg border border-slate-100 bg-slate-50 p-2 text-[11px]">
-            <div>
-              <span className="block text-[10px] text-slate-400">Main Server</span>
-              <span
-                className={`font-bold inline-flex items-center gap-1 ${
-                  summary.health === 'conflict' || summary.health === 'error'
-                    ? 'text-rose-800'
-                    : !summary.networkOnline
-                      ? 'text-amber-800'
-                      : 'text-slate-800'
-                }`}
-              >
-                <Database
-                  className={`h-3 w-3 ${
+          <div className="rounded-lg border border-slate-100 bg-slate-50 p-2 space-y-2 text-[11px]">
+            <div className="grid grid-cols-3 gap-1.5">
+              <div>
+                <span className="block text-[10px] text-slate-400">Main Server</span>
+                <span
+                  className={`font-bold inline-flex items-center gap-1 ${
                     summary.health === 'conflict' || summary.health === 'error'
-                      ? 'text-rose-700'
+                      ? 'text-rose-800'
                       : !summary.networkOnline
-                        ? 'text-amber-700'
-                        : 'text-emerald-700'
+                        ? 'text-amber-800'
+                        : 'text-slate-800'
                   }`}
-                />
-                {summary.health === 'conflict'
-                  ? 'Conflict'
-                  : summary.health === 'error'
-                    ? 'Sync Error'
-                    : summary.networkOnline
-                      ? 'Reachable'
-                      : 'No Network'}
-              </span>
+                >
+                  <Database
+                    className={`h-3 w-3 ${
+                      summary.health === 'conflict' || summary.health === 'error'
+                        ? 'text-rose-700'
+                        : !summary.networkOnline
+                          ? 'text-amber-700'
+                          : 'text-emerald-700'
+                    }`}
+                  />
+                  {summary.health === 'conflict'
+                    ? 'Conflict'
+                    : summary.health === 'error'
+                      ? 'Sync Error'
+                      : summary.networkOnline
+                        ? 'Reachable'
+                        : 'No Network'}
+                </span>
+              </div>
+              <div>
+                <span className="block text-[10px] text-slate-400">Sync Version</span>
+                <span className="font-bold text-slate-800 tabular-nums">
+                  v{state.version ?? 1}
+                </span>
+              </div>
+              <div>
+                <span className="block text-[10px] text-slate-400">Realtime SSE</span>
+                <span
+                  className={`font-bold ${
+                    summary.sseConnected ? 'text-emerald-800' : 'text-slate-600'
+                  }`}
+                >
+                  {summary.sseConnected ? 'Live' : 'Standby'}
+                </span>
+              </div>
             </div>
-            <div>
-              <span className="block text-[10px] text-slate-400">Sync Version</span>
-              <span className="font-bold text-slate-800 tabular-nums">
-                v{state.version ?? 1}
+
+            <div
+              data-testid="sell-sw-cache-status"
+              className="flex items-center justify-between gap-2 border-t border-slate-200/80 pt-1.5"
+            >
+              <span className="inline-flex items-center gap-1.5 text-slate-600">
+                <HardDrive className="h-3 w-3 text-emerald-700 shrink-0" />
+                <span>SW Cache:</span>
+                <strong
+                  className={
+                    cacheBadge.tone === 'emerald'
+                      ? 'text-emerald-800'
+                      : cacheBadge.tone === 'amber'
+                        ? 'text-amber-800'
+                        : cacheBadge.tone === 'sky'
+                          ? 'text-sky-800'
+                          : 'text-slate-700'
+                  }
+                >
+                  {cacheBadge.label}
+                </strong>
               </span>
-            </div>
-            <div>
-              <span className="block text-[10px] text-slate-400">Realtime SSE</span>
-              <span
-                className={`font-bold ${
-                  summary.sseConnected ? 'text-emerald-800' : 'text-slate-600'
-                }`}
-              >
-                {summary.sseConnected ? 'Live' : 'Standby'}
-              </span>
+              {cacheSnapshot.needRefresh && (
+                <button
+                  type="button"
+                  onClick={() => void triggerServiceWorkerUpdate()}
+                  className="rounded bg-sky-700 px-2 py-0.5 text-[10px] font-bold text-white hover:bg-sky-800"
+                >
+                  Update App
+                </button>
+              )}
             </div>
           </div>
 

@@ -150,6 +150,19 @@ export interface BranchConfig {
   pointsValuePer100: number;
   telegramBotConnected: boolean;
   telegramChannel: string;
+  telegramBotHandle?: string;
+  telegramScheduleTime?: string;
+  telegramAlerts?: {
+    dailyClose: boolean;
+    lowStock: boolean;
+    highVoidDiscount: boolean;
+  };
+  aiFeatures?: {
+    shiftOptimization: boolean;
+    stockMonitor: boolean;
+    revenueForecast: boolean;
+    menuPairings: boolean;
+  };
   displayPairingCode: string;
   displayFeaturedMode: 'auto' | 'manual' | 'off';
   displayShowNewPage: boolean;
@@ -194,6 +207,11 @@ export interface PosTable {
   openedAt?: string;
   currentOrderId?: string;
   pendingTransferAlert?: boolean;
+  gridCol?: number;
+  gridRow?: number;
+  qrCodeSlug?: string;
+  qrEnabled?: boolean;
+  qrAssignedAt?: string;
 }
 
 export type OrderChannel =

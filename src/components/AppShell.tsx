@@ -63,6 +63,7 @@ import {
 import { normalizeInvoiceTemplate } from '../utils/invoiceTemplate';
 import { CommandPalette } from './CommandPalette';
 import { CompanyLogoBadge } from './CompanyLogoBadge';
+import { PWAInstallButton } from './PWAInstallButton';
 import { SubscriptionKhqrCard } from './SubscriptionKhqrCard';
 import { TenantRegistrationModal } from './TenantRegistrationModal';
 
@@ -88,6 +89,7 @@ export function AppShell({ children }: AppShellProps) {
     firebaseUser,
     cloudStatus,
     sseConnected,
+    networkOnline,
     signInWithGoogle,
     signOutGoogle,
     exitToWelcome,
@@ -375,9 +377,9 @@ export function AppShell({ children }: AppShellProps) {
       {/* Main Column */}
       <div className="flex-1 min-w-0 flex flex-col">
         {/* Top Bar */}
-        <header className="no-print h-14 bg-white border-b border-slate-200 px-3 sm:px-5 flex items-center justify-between gap-3">
+        <header className="no-print h-14 bg-white border-b border-slate-200 px-3 sm:px-5 flex items-center justify-between gap-2.5">
           {/* Left: Branch Selector + Rate + Shift */}
-          <div className="flex items-center gap-2.5 min-w-0">
+          <div className="flex items-center gap-2 min-w-0 flex-1 overflow-hidden">
             <div className="relative">
               <button
                 type="button"
@@ -529,7 +531,7 @@ export function AppShell({ children }: AppShellProps) {
                 <button
                   type="button"
                   onClick={() => setNavSection('plan_billing')}
-                  className={`rounded-md px-2 py-1 font-semibold whitespace-nowrap border ${
+                  className={`hidden 2xl:inline-flex rounded-md px-2 py-1 font-semibold whitespace-nowrap border ${
                     subscriptionActive
                       ? 'border-emerald-200 bg-emerald-50 text-emerald-800 hover:bg-emerald-100'
                       : 'border-amber-300 bg-amber-50 text-amber-900 hover:bg-amber-100'
@@ -543,7 +545,7 @@ export function AppShell({ children }: AppShellProps) {
           </div>
 
           {/* Right Controls */}
-          <div className="flex items-center gap-2 shrink-0">
+          <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
             {/* Command Palette Launcher (Ctrl+K / Cmd+K) */}
             <button
               type="button"
@@ -552,35 +554,42 @@ export function AppShell({ children }: AppShellProps) {
               className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-100"
             >
               <Search className="h-3.5 w-3.5 text-emerald-700" />
-              <span className="hidden xl:inline">Quick Jump</span>
+              <span className="hidden 2xl:inline">Quick Jump</span>
               <kbd className="hidden sm:inline rounded bg-white border border-slate-200 px-1.5 py-0.2 text-[10px] font-mono text-slate-500">
                 ⌘K
               </kbd>
             </button>
 
+            <PWAInstallButton />
+
             {/* Offline / SQLite Live Sync Button */}
             <button
               type="button"
               onClick={() => {
+                if (!networkOnline) return;
                 if (state.offlineMode) syncOfflineBills();
                 else toggleOfflineMode();
               }}
               title={
-                state.offlineMode
-                  ? 'Click to go online & flush queued bills to SQLite'
-                  : 'SQLite WAL + SSE Sync Active (click to test offline queue)'
+                !networkOnline
+                  ? 'Browser is offline — Service Worker & local queue active'
+                  : state.offlineMode
+                    ? 'Click to go online & flush queued bills to SQLite'
+                    : 'SQLite WAL + SSE Sync Active (click to test offline queue)'
               }
-              className={`hidden sm:inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium whitespace-nowrap ${
-                state.offlineMode
+              className={`${
+                !networkOnline || state.offlineMode ? 'inline-flex' : 'hidden sm:inline-flex'
+              } items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium whitespace-nowrap ${
+                !networkOnline || state.offlineMode
                   ? 'border-amber-300 bg-amber-50 text-amber-900'
                   : 'border-emerald-200 bg-emerald-50/60 text-emerald-900 hover:bg-emerald-50'
               }`}
             >
-              {state.offlineMode ? (
+              {!networkOnline || state.offlineMode ? (
                 <>
                   <WifiOff className="h-3.5 w-3.5 text-amber-700" />
                   <span>
-                    {t.offlineMode}
+                    {!networkOnline ? 'Offline' : t.offlineMode}
                     {offlineBillsCount > 0 ? ` (${offlineBillsCount})` : ''}
                   </span>
                 </>

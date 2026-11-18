@@ -17,6 +17,11 @@ import {
   type AiPairingsRequestPayload,
   type RawGeminiPairingsPayload,
 } from '../utils/aiPairings';
+import {
+  normalizeAiShiftOptimizationReport,
+  type RawGeminiShiftOptimizationPayload,
+  type ShiftOptimizationRequestPayload,
+} from '../utils/aiShiftOptimization';
 import { isValidBakongAccountId } from '../utils/bakongKhqr';
 import { normalizeMd5List, parseBakongCallbackBody } from '../utils/bakongPolling';
 import type { SubscriptionPlan } from '../utils/subscription';
@@ -74,6 +79,7 @@ export function createApiRouter(repo: PosSqliteRepository): express.Router {
   ).replace(/\/+$/, '');
   const bakongToken = (process.env.BAKONG_API_TOKEN || '').trim();
   const geminiApiKey = (process.env.GEMINI_API_KEY || '').trim();
+  const telegramBotToken = (process.env.TELEGRAM_BOT_TOKEN || '').trim();
 
   // ---------------------------------------------------------------------------
   // Health & SQLite Engine Status
@@ -93,6 +99,7 @@ export function createApiRouter(repo: PosSqliteRepository): express.Router {
       bakongLiveConfigured: Boolean(bakongToken),
       bakongBaseUrl,
       geminiConfigured: Boolean(geminiApiKey),
+      telegramConfigured: Boolean(telegramBotToken),
       timestamp: new Date().toISOString(),
     });
   });
@@ -1003,6 +1010,14 @@ export function createApiRouter(repo: PosSqliteRepository): express.Router {
   const inFlightPairings = new Map<
     string,
     Promise<ReturnType<typeof normalizeAiPairingsReport>>
+  >();
+  const shiftOptResponseCache = new Map<
+    string,
+    { optimization: ReturnType<typeof normalizeAiShiftOptimizationReport>; cachedAtMs: number }
+  >();
+  const inFlightShiftOpts = new Map<
+    string,
+    Promise<ReturnType<typeof normalizeAiShiftOptimizationReport>>
   >();
 
   const createGeminiClient = (apiKey: string) =>
@@ -1927,6 +1942,336 @@ export function createApiRouter(repo: PosSqliteRepository): express.Router {
         configured: true,
         answer: '',
         error: parsedErr.message,
+      });
+    }
+  });
+
+  router.post('/ai/shift-optimization', async (req: Request, res: Response) => {
+    const body = (req.body ?? {}) as Partial<ShiftOptimizationRequestPayload> & {
+      forceRefresh?: boolean;
+    };
+
+    if (!geminiApiKey) {
+      res.status(503).json({
+        ok: false,
+        configured: false,
+        error:
+          'Gemini API key is not configured. Open Settings > Secrets to provide GEMINI_API_KEY.',
+      });
+      return;
+    }
+
+    const branchId = typeof body.branchId === 'string' ? body.branchId : 'branch_bkk1';
+    const branchName = typeof body.branchName === 'string' ? body.branchName : 'Store Branch';
+    const daypartTraffic = Array.isArray(body.daypartTraffic) ? body.daypartTraffic : [];
+    const historicalDays = Array.isArray(body.historicalDays) ? body.historicalDays : [];
+    const targetShifts = Array.isArray(body.targetShifts) ? body.targetShifts : [];
+
+    if (targetShifts.length === 0) {
+      res.status(400).json({
+        ok: false,
+        configured: true,
+        error: 'targetShifts and sales history are required to optimize shift staffing.',
+      });
+      return;
+    }
+
+    const payload: ShiftOptimizationRequestPayload = {
+      branchId,
+      branchName,
+      referenceDate:
+        typeof body.referenceDate === 'string'
+          ? body.referenceDate
+          : new Date().toISOString().slice(0, 10),
+      exchangeRate: typeof body.exchangeRate === 'number' ? body.exchangeRate : 4100,
+      observedPeakWindow:
+        typeof body.observedPeakWindow === 'string'
+          ? body.observedPeakWindow
+          : 'Lunch Rush (11:00 – 15:00)',
+      avgDailyRevenueUsd: Number(body.avgDailyRevenueUsd) || 0,
+      avgDailyOrders: Number(body.avgDailyOrders) || 0,
+      weekendLiftPct: Number(body.weekendLiftPct) || 0,
+      upcomingReservationsCount: Number(body.upcomingReservationsCount) || 0,
+      closedShiftsSampled: Number(body.closedShiftsSampled) || 0,
+      currentBranchStaffCount: Number(body.currentBranchStaffCount) || 1,
+      currentRoleCounts: body.currentRoleCounts ?? {
+        cashiers: 1,
+        kitchen: 1,
+        barOrFloor: 1,
+        supervisor: 1,
+      },
+      daypartTraffic,
+      historicalDays,
+      targetShifts,
+    };
+
+    const forceRefresh = Boolean(body.forceRefresh);
+    const cacheKey = [
+      branchId,
+      payload.referenceDate,
+      payload.currentBranchStaffCount,
+      payload.upcomingReservationsCount,
+      daypartTraffic.map((d) => `${d.id}:${d.orderCount}`).join('|'),
+      historicalDays.slice(-7).map((h) => `${h.date}:${h.netSalesUsd}`).join('|'),
+    ].join('::');
+
+    if (!forceRefresh) {
+      const cached = shiftOptResponseCache.get(cacheKey);
+      if (cached && Date.now() - cached.cachedAtMs < FORECAST_CACHE_TTL_MS) {
+        res.json({
+          ok: true,
+          configured: true,
+          cached: true,
+          model: GEMINI_MODEL,
+          optimization: cached.optimization,
+        });
+        return;
+      }
+    }
+
+    try {
+      let pending = !forceRefresh ? inFlightShiftOpts.get(cacheKey) : undefined;
+      if (!pending) {
+        pending = (async () => {
+          const ai = createGeminiClient(geminiApiKey);
+          const callShiftOptModel = (modelName: string, timeoutMs: number) =>
+            ai.models.generateContent({
+              model: modelName,
+              contents: [
+                'Analyze this store historical daily revenue, daypart order distribution, reservations, and current active roster to recommend ideal staffing headcounts and roles for each upcoming shift in targetShifts.',
+                'Ensure recommendedTotalStaff equals cashiers + kitchen + barOrFloor + supervisor and explain how predicted traffic informs each shift.',
+                '',
+                JSON.stringify(payload),
+              ].join('\n'),
+              config: {
+                abortSignal: AbortSignal.timeout(timeoutMs),
+                systemInstruction:
+                  'You are a senior hospitality & retail operations labor planner in Cambodia. Return calibrated, practical shift staffing plans strictly grounded in the store traffic history and targetShifts provided.',
+                ...(modelName === GEMINI_MODEL
+                  ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } }
+                  : {}),
+                responseMimeType: 'application/json',
+                responseSchema: {
+                  type: Type.OBJECT,
+                  properties: {
+                    summary: {
+                      type: Type.STRING,
+                      description: '2-sentence executive summary of peak traffic patterns and staffing plan.',
+                    },
+                    peakWindow: {
+                      type: Type.STRING,
+                      description: 'Predicted busiest shift window e.g. 11:30 – 14:30 Lunch Rush.',
+                    },
+                    trafficTrend: {
+                      type: Type.STRING,
+                      description: 'One of: growing, steady, or variable.',
+                    },
+                    shiftRecommendations: {
+                      type: Type.ARRAY,
+                      items: {
+                        type: Type.OBJECT,
+                        properties: {
+                          shiftName: { type: Type.STRING },
+                          timeWindow: { type: Type.STRING },
+                          dayLabel: { type: Type.STRING },
+                          expectedTrafficLevel: {
+                            type: Type.STRING,
+                            description: 'One of: high, moderate, or low',
+                          },
+                          expectedOrders: { type: Type.NUMBER },
+                          expectedRevenueUsd: { type: Type.NUMBER },
+                          recommendedTotalStaff: { type: Type.NUMBER },
+                          roleBreakdown: {
+                            type: Type.OBJECT,
+                            properties: {
+                              cashiers: { type: Type.INTEGER },
+                              kitchen: { type: Type.INTEGER },
+                              barOrFloor: { type: Type.INTEGER },
+                              supervisor: { type: Type.INTEGER },
+                            },
+                            required: ['cashiers', 'kitchen', 'barOrFloor', 'supervisor'],
+                          },
+                          rationale: { type: Type.STRING },
+                        },
+                        required: [
+                          'shiftName',
+                          'timeWindow',
+                          'dayLabel',
+                          'expectedTrafficLevel',
+                          'expectedOrders',
+                          'expectedRevenueUsd',
+                          'recommendedTotalStaff',
+                          'roleBreakdown',
+                          'rationale',
+                        ],
+                      },
+                    },
+                    optimizationActions: {
+                      type: Type.ARRAY,
+                      items: { type: Type.STRING },
+                      description: '2 to 3 actionable shift scheduling tips.',
+                    },
+                  },
+                  required: [
+                    'summary',
+                    'peakWindow',
+                    'trafficTrend',
+                    'shiftRecommendations',
+                    'optimizationActions',
+                  ],
+                },
+              },
+            });
+
+          let usedModel = GEMINI_MODEL;
+          let response;
+          try {
+            response = await withGeminiRetry(() => callShiftOptModel(GEMINI_MODEL, 12000));
+          } catch (primaryErr) {
+            const parsedPrimary = parseGeminiError(primaryErr);
+            const errName = (primaryErr as { name?: string })?.name || '';
+            const isTransientCapacityOrTimeout =
+              parsedPrimary.status === 503 ||
+              errName === 'TimeoutError' ||
+              errName === 'AbortError' ||
+              parsedPrimary.message.toLowerCase().includes('timeout') ||
+              parsedPrimary.message.toLowerCase().includes('abort');
+            if (!isTransientCapacityOrTimeout) {
+              throw primaryErr;
+            }
+            usedModel = 'gemini-3.1-flash-lite';
+            response = await callShiftOptModel(usedModel, 18000);
+          }
+
+          const rawText = (response.text ?? '').trim();
+          if (!rawText) {
+            throw new Error('Gemini returned an empty shift optimization response.');
+          }
+          let parsedRaw: RawGeminiShiftOptimizationPayload;
+          try {
+            parsedRaw = JSON.parse(rawText) as RawGeminiShiftOptimizationPayload;
+          } catch {
+            throw new Error('Unable to parse structured shift optimization JSON from Gemini.');
+          }
+
+          const normalized = normalizeAiShiftOptimizationReport(parsedRaw, {
+            model: usedModel,
+            generatedAt: new Date().toISOString(),
+            payload,
+          });
+          shiftOptResponseCache.set(cacheKey, {
+            optimization: normalized,
+            cachedAtMs: Date.now(),
+          });
+          return normalized;
+        })().finally(() => {
+          inFlightShiftOpts.delete(cacheKey);
+        });
+
+        inFlightShiftOpts.set(cacheKey, pending);
+      }
+
+      const optimization = await pending;
+      res.json({
+        ok: true,
+        configured: true,
+        model: optimization.model,
+        optimization,
+      });
+    } catch (err) {
+      const parsedErr = parseGeminiError(err);
+      res.status(parsedErr.status).json({
+        ok: false,
+        configured: true,
+        error: parsedErr.message,
+      });
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // Telegram Bot Report & Alert Dispatch
+  // ---------------------------------------------------------------------------
+  router.post('/telegram/send', async (req: Request, res: Response) => {
+    const body = (req.body ?? {}) as {
+      channel?: string;
+      botHandle?: string;
+      message?: string;
+      branchName?: string;
+      isTest?: boolean;
+    };
+    const channel = String(body.channel || '').trim();
+    const botHandle = String(body.botHandle || '').trim();
+    const message = String(body.message || '').trim();
+
+    if (!channel) {
+      res.status(400).json({
+        ok: false,
+        error: 'Target Telegram channel or group chat ID (e.g. @lotuscafebkk1 or -100...) is required.',
+      });
+      return;
+    }
+    if (!message) {
+      res.status(400).json({
+        ok: false,
+        error: 'Message payload cannot be empty.',
+      });
+      return;
+    }
+
+    if (!telegramBotToken) {
+      res.json({
+        ok: true,
+        deliveredViaTelegramApi: false,
+        channel,
+        botHandle: botHandle || '@StorePosBot',
+        dispatchedAt: new Date().toISOString(),
+        notice:
+          'TELEGRAM_BOT_TOKEN is not set in server Secrets — validated payload & queued local preview dispatch.',
+      });
+      return;
+    }
+
+    try {
+      const tgRes = await fetch(
+        `https://api.telegram.org/bot${encodeURIComponent(telegramBotToken)}/sendMessage`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            chat_id: channel,
+            text: message,
+            disable_web_page_preview: true,
+          }),
+          signal: AbortSignal.timeout(10000),
+        }
+      );
+      const tgData = (await tgRes.json().catch(() => ({}))) as {
+        ok?: boolean;
+        description?: string;
+        result?: { message_id?: number };
+      };
+      if (!tgRes.ok || !tgData.ok) {
+        res.status(502).json({
+          ok: false,
+          deliveredViaTelegramApi: false,
+          error: tgData.description || `Telegram Bot API returned HTTP ${tgRes.status}.`,
+        });
+        return;
+      }
+      res.json({
+        ok: true,
+        deliveredViaTelegramApi: true,
+        channel,
+        botHandle: botHandle || '@StorePosBot',
+        messageId: tgData.result?.message_id ?? null,
+        dispatchedAt: new Date().toISOString(),
+        notice: `Delivered via Telegram Bot API to ${channel}.`,
+      });
+    } catch (err) {
+      res.status(502).json({
+        ok: false,
+        deliveredViaTelegramApi: false,
+        error: err instanceof Error ? err.message : 'Unable to reach Telegram Bot API.',
       });
     }
   });

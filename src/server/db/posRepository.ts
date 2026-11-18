@@ -51,6 +51,7 @@ import {
 } from './authSecurity';
 import { runSqliteMigrations, TRACKED_SQLITE_TABLES } from './schema';
 import type { SqliteConnection } from './sqliteDriver';
+import { routeIncomingQrOrder } from '../../utils/qrAutoRouting';
 
 const SESSION_DURATION_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 
@@ -215,6 +216,50 @@ export class PosSqliteRepository {
             { bypassSecurityControls: true }
           );
         }
+      }
+
+      // One-time upgrade for existing SQLite demo tenant: ensure default QR auto-routing,
+      // black tea recipe link, 30-day revenue history, and Telegram handle defaults exist
+      // without overwriting later user Settings changes.
+      const currentDemo = this.loadTenantState('tenant_lotus_bkk1');
+      if (
+        currentDemo &&
+        (!currentDemo.menuItems.some((m) => m.id === 'm_black_tea') ||
+          currentDemo.dailyRevenueHistory.length <= 7 ||
+          !currentDemo.branches.some((b) => Boolean(b.telegramBotHandle)))
+      ) {
+        const demoSeed = createSeedState('restaurant');
+        const teaItem = demoSeed.menuItems.find((m) => m.id === 'm_black_tea');
+        const teaRecipe = demoSeed.recipes.find((r) => r.menuItemId === 'm_black_tea');
+        this.saveTenantState(
+          {
+            ...currentDemo,
+            branches: currentDemo.branches.map((b) => {
+              const seedBranch = demoSeed.branches.find((sb) => sb.id === b.id);
+              return {
+                ...b,
+                qrMode: b.id === 'branch_bkk1' ? 'auto' : b.qrMode,
+                telegramBotHandle: b.telegramBotHandle || seedBranch?.telegramBotHandle,
+                telegramScheduleTime: b.telegramScheduleTime || seedBranch?.telegramScheduleTime,
+                telegramAlerts: b.telegramAlerts || seedBranch?.telegramAlerts,
+                aiFeatures: b.aiFeatures || seedBranch?.aiFeatures,
+              };
+            }),
+            menuItems:
+              teaItem && !currentDemo.menuItems.some((m) => m.id === 'm_black_tea')
+                ? [...currentDemo.menuItems, teaItem]
+                : currentDemo.menuItems,
+            recipes:
+              teaRecipe && !currentDemo.recipes.some((r) => r.menuItemId === 'm_black_tea')
+                ? [...currentDemo.recipes, teaRecipe]
+                : currentDemo.recipes,
+            dailyRevenueHistory:
+              currentDemo.dailyRevenueHistory.length <= 7
+                ? demoSeed.dailyRevenueHistory
+                : currentDemo.dailyRevenueHistory,
+          },
+          { bypassSecurityControls: true }
+        );
       }
     }
   }
@@ -1731,20 +1776,15 @@ export class PosSqliteRepository {
     const state = this.loadTenantState(tenantId);
     if (!state) throw new Error('Tenant not found.');
 
-    const qrOrder: QrIncomingOrder = {
-      ...payload,
-      id: generateUid('qr'),
-      createdAt: new Date().toISOString(),
-      status: 'pending',
-    };
+    const routed = routeIncomingQrOrder({
+      state,
+      payload,
+      qrId: generateUid('qr'),
+      orderId: generateUid('ord_qr'),
+      nowIso: new Date().toISOString(),
+    });
 
-    return this.saveTenantState(
-      {
-        ...state,
-        qrQueue: [qrOrder, ...state.qrQueue],
-      },
-      { bypassSecurityControls: true }
-    );
+    return this.saveTenantState(routed.state, { bypassSecurityControls: true });
   }
 
   appendGuestServiceAlert(params: {

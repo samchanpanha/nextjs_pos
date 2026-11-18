@@ -16,6 +16,7 @@ import {
 import { usePos } from '../context/PosContext';
 import { calculateDrawerReconciliation, roundCurrency, usdToKhr } from '../utils/posMath';
 import { AiForecastWidget } from './AiForecastWidget';
+import { AiShiftOptimizationPanel } from './AiShiftOptimizationPanel';
 
 const USD_DENOMS = [100, 50, 20, 10, 5, 1] as const;
 const KHR_DENOMS = [100000, 50000, 20000, 10000, 5000, 1000, 500] as const;
@@ -748,6 +749,9 @@ export function ShiftDrawerView() {
           </div>
         </div>
       )}
+
+      {/* AI Shift Optimization */}
+      <AiShiftOptimizationPanel />
 
       {/* Closed Shift History */}
       <div className="rounded-xl border border-slate-200 bg-white p-4">

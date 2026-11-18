@@ -13,11 +13,13 @@ import {
   RotateCcw,
   Sparkles,
   Truck,
+  TrendingDown,
 } from 'lucide-react';
 import { usePos } from '../context/PosContext';
 import { roundCurrency, usdToKhr } from '../utils/posMath';
 import { AiStockMonitorPanel } from './AiStockMonitorPanel';
 import { AutoRestockPanel } from './AutoRestockPanel';
+import { InventoryProjectionPanel } from './InventoryProjectionPanel';
 import {
   areRecipeLinesEqual,
   calculateMenuProfitMargin,
@@ -27,7 +29,14 @@ import {
 } from '../utils/recipeMargin';
 import type { RecipeLine } from '../types/pos';
 
-type StockSubTab = 'stock' | 'ai_monitor' | 'auto_restock' | 'recipes' | 'history' | 'margin';
+type StockSubTab =
+  | 'stock'
+  | 'projection'
+  | 'ai_monitor'
+  | 'auto_restock'
+  | 'recipes'
+  | 'history'
+  | 'margin';
 type MarginFilter = 'all' | 'linked' | 'unlinked' | 'low';
 type MarginSort = 'margin_asc' | 'margin_desc' | 'cost_desc' | 'name_asc';
 
@@ -366,6 +375,7 @@ export function InventoryView() {
           {(
             [
               { id: 'stock', label: 'Stock' },
+              { id: 'projection', label: 'Inventory Projection' },
               { id: 'ai_monitor', label: 'AI Stock Monitor' },
               { id: 'auto_restock', label: 'Auto-Restock' },
               { id: 'recipes', label: 'Recipes & margin' },
@@ -379,12 +389,13 @@ export function InventoryView() {
               role="tab"
               aria-selected={subTab === tab.id}
               onClick={() => setSubTab(tab.id)}
-              className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors ${
+              className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
                 subTab === tab.id
                   ? 'bg-emerald-800 text-white'
                   : 'border border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
               }`}
             >
+              {tab.id === 'projection' && <TrendingDown className="h-3.5 w-3.5" />}
               {tab.id === 'ai_monitor' && <Sparkles className="h-3.5 w-3.5" />}
               {tab.id === 'auto_restock' && <Truck className="h-3.5 w-3.5" />}
               <span>{tab.label}</span>
@@ -474,8 +485,16 @@ export function InventoryView() {
             <div className="flex flex-wrap items-center gap-2">
               <button
                 type="button"
+                onClick={() => setSubTab('projection')}
+                className="inline-flex items-center gap-1 rounded-lg border border-emerald-300 bg-white px-3 py-1.5 text-[11px] font-semibold text-emerald-800 hover:bg-emerald-50 whitespace-nowrap shrink-0"
+              >
+                <TrendingDown className="h-3.5 w-3.5" />
+                Inventory Projection
+              </button>
+              <button
+                type="button"
                 onClick={() => setSubTab('auto_restock')}
-                className="inline-flex items-center gap-1 rounded-lg border border-emerald-300 bg-white px-3 py-1.5 text-[11px] font-semibold text-emerald-800 hover:bg-emerald-50"
+                className="inline-flex items-center gap-1 rounded-lg border border-emerald-300 bg-white px-3 py-1.5 text-[11px] font-semibold text-emerald-800 hover:bg-emerald-50 whitespace-nowrap shrink-0"
               >
                 <Truck className="h-3.5 w-3.5" />
                 Auto-Restock drafts
@@ -488,7 +507,7 @@ export function InventoryView() {
               <button
                 type="button"
                 onClick={() => setSubTab('ai_monitor')}
-                className="rounded-lg bg-emerald-800 px-3 py-1.5 text-[11px] font-semibold text-white hover:bg-emerald-900"
+                className="rounded-lg bg-emerald-800 px-3 py-1.5 text-[11px] font-semibold text-white hover:bg-emerald-900 whitespace-nowrap shrink-0"
               >
                 Open AI Stock Monitor
               </button>
@@ -1447,6 +1466,22 @@ export function InventoryView() {
             </div>
           </div>
         </div>
+      )}
+
+      {subTab === 'projection' && (
+        <InventoryProjectionPanel
+          onOpenAutoRestock={() => setSubTab('auto_restock')}
+          onRestockIngredient={(ingredientId, suggestedQty) => {
+            const ing = branchIngredients.find((i) => i.id === ingredientId);
+            setSelectedIngId(ingredientId);
+            setActionMode('purchase');
+            setQtyInput(String(suggestedQty));
+            if (ing) {
+              setCostInput(roundCurrency(suggestedQty * ing.avgCostUsd).toFixed(2));
+            }
+            setSubTab('stock');
+          }}
+        />
       )}
 
       {subTab === 'ai_monitor' && (

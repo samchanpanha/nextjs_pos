@@ -19,6 +19,7 @@ import type { LanguageCode, MenuItem } from '../types/pos';
 import { usdToKhr } from '../utils/posMath';
 import { submitPublicServiceAlertToSqlite } from '../lib/sqliteClient';
 import { resolveGuestOrderLiveStatus, type GuestOrderStage } from '../utils/guestOrderStatus';
+import { findTableMatchingQrParam } from '../utils/floorPlanQr';
 
 const STAGE_COPY: Record<
   LanguageCode,
@@ -105,9 +106,7 @@ export function GuestQrView() {
     const tableParam = params.get('table');
     if (tableParam) {
       if (tableParam.toLowerCase() === 'counter') return '';
-      const match = branchTables.find(
-        (tb) => tb.name.toLowerCase() === tableParam.toLowerCase() || tb.id === tableParam
-      );
+      const match = findTableMatchingQrParam(branchTables, tableParam);
       if (match) return match.id;
     }
     return branchTables[2]?.id || branchTables[0]?.id || '';
@@ -121,9 +120,7 @@ export function GuestQrView() {
       setSelectedTableId('');
       return;
     }
-    const match = branchTables.find(
-      (tb) => tb.name.toLowerCase() === tableParam.toLowerCase() || tb.id === tableParam
-    );
+    const match = findTableMatchingQrParam(branchTables, tableParam);
     if (match) setSelectedTableId(match.id);
   }, [activeBranch.id]);
 

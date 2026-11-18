@@ -33,6 +33,10 @@ import { PayModal } from './PayModal';
 import { SuggestedPairingsCard } from './SuggestedPairingsCard';
 import { DailySalesSummaryCard } from './DailySalesSummaryCard';
 import { SyncStatusAlertBanner, SyncStatusToolbarControl } from './SyncStatusIndicator';
+import { VoiceOrderControl } from './VoiceOrderControl';
+import type { VoiceMatchedOrderItem } from '../utils/voiceOrderParser';
+import { LowStockBadge } from './LowStockBadge';
+import { analyzeMenuLowStock } from '../utils/sellLowStock';
 
 const QUICK_NOTES = ['No ice', 'Less ice', 'Less sugar', 'Less spicy', 'No onion', 'Serve first'];
 
@@ -60,6 +64,8 @@ export function SellView() {
     splitOrderItems,
     settleOrderPayment,
     setReceiptOrder,
+    setNavSection,
+    notify,
   } = usePos();
 
   const t = I18N[language];
@@ -155,6 +161,36 @@ export function SellView() {
       return;
     }
     addItemToOrder(targetOrderId, item);
+  };
+
+  const handleApplyVoiceItems = (matchedItems: VoiceMatchedOrderItem[]) => {
+    if (matchedItems.length === 0) return;
+    let targetOrderId = activeOrder?.id;
+    let orderLabel = activeOrder?.tableName;
+    if (!targetOrderId) {
+      targetOrderId = createTakeAwayOrder('take_away');
+      orderLabel = 'Take-away';
+    }
+    let totalUnitsAdded = 0;
+    for (const entry of matchedItems) {
+      addItemToOrder(
+        targetOrderId,
+        entry.item,
+        entry.optionLabel,
+        entry.deltaUsd,
+        undefined,
+        entry.note,
+        entry.qty
+      );
+      totalUnitsAdded += entry.qty;
+    }
+    setSubTab('menu');
+    notify(
+      `Added ${totalUnitsAdded} voice ${totalUnitsAdded === 1 ? 'item' : 'items'} to ${
+        orderLabel || 'order'
+      }.`,
+      'success'
+    );
   };
 
   const draftItems = activeOrder ? activeOrder.items.filter((i) => !i.sentToKitchen && !i.voided) : [];
@@ -305,6 +341,17 @@ export function SellView() {
     totalDueKhr,
   ]);
 
+  const lowStockSummary = useMemo(
+    () =>
+      analyzeMenuLowStock({
+        menuItems: state.menuItems,
+        recipes: state.recipes,
+        ingredients: state.ingredients,
+        branchId: activeBranch.id,
+      }),
+    [state.menuItems, state.recipes, state.ingredients, activeBranch.id]
+  );
+
   const filteredMenu = branchMenu.filter((item) => {
     const itemType = item.itemType === 'service' ? 'service' : 'product';
     const typeOk = typeFilter === 'all' || itemType === typeFilter;
@@ -395,6 +442,18 @@ export function SellView() {
             </button>
 
             <SyncStatusToolbarControl />
+
+            <VoiceOrderControl
+              menuItems={branchMenu}
+              language={language}
+              activeOrderLabel={activeOrder?.tableName}
+              onApplyMatchedItems={handleApplyVoiceItems}
+            />
+
+            <LowStockBadge
+              summary={lowStockSummary}
+              onOpenInventory={() => setNavSection('stock')}
+            />
           </div>
 
           {subTab === 'menu' ? (
@@ -677,6 +736,7 @@ export function SellView() {
                   activeBranch.rielRounding
                 );
                 const isService = item.itemType === 'service';
+                const stockAlert = lowStockSummary.alertByMenuItemId.get(item.id);
                 return (
                   <button
                     key={item.id}
@@ -691,7 +751,20 @@ export function SellView() {
                         {qtyInCart}
                       </span>
                     )}
-                    <div className="flex justify-end text-[10px] font-semibold capitalize">
+                    <div className="flex items-center justify-end gap-1.5 text-[10px] font-semibold capitalize">
+                      {stockAlert && (
+                        <span
+                          className={`rounded px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide ${
+                            stockAlert.severity === 'out'
+                              ? 'bg-red-100 text-red-800'
+                              : 'bg-amber-100 text-amber-900'
+                          }`}
+                        >
+                          {stockAlert.severity === 'out'
+                            ? 'OUT'
+                            : `LOW · ${stockAlert.maxServingsLeft}`}
+                        </span>
+                      )}
                       {isService ? (
                         <span className="text-amber-700">Service</span>
                       ) : (

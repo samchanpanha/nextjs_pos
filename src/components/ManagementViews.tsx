@@ -74,6 +74,11 @@ import { QrCodeBox } from './QrCodeBox';
 import { ReceiptInvoiceDocument } from './ReceiptInvoiceDocument';
 import { SubscriptionKhqrCard } from './SubscriptionKhqrCard';
 import { TenantRegistrationModal } from './TenantRegistrationModal';
+import { TablesFloorPlanWorkspace } from './TablesFloorPlanWorkspace';
+import {
+  AiCapabilitiesSettingsPanel,
+  TelegramBotSettingsPanel,
+} from './BranchIntegrationsPanel';
 
 export function MenuManagementView() {
   const { state, activeBranch, saveMenuItem, deleteMenuItem, importMenuItems } = usePos();
@@ -613,168 +618,7 @@ export function MenuManagementView() {
 }
 
 export function TablesAreasView() {
-  const { state, activeBranch, saveTable, deleteTable, setExternalMode } = usePos();
-  const [editingTableId, setEditingTableId] = useState<string | null>(null);
-  const [name, setName] = useState('');
-  const [area, setArea] = useState<PosTable['area']>('Indoor');
-  const [seats, setSeats] = useState('4');
-
-  const tables = state.tables.filter((t) => t.branchId === activeBranch.id);
-
-  const handleAddTable = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!name.trim()) return;
-    saveTable({
-      id: editingTableId || undefined,
-      name: name.trim(),
-      area,
-      seats: Math.max(1, Number(seats) || 4),
-    });
-    setEditingTableId(null);
-    setName('');
-    setSeats('4');
-  };
-
-  return (
-    <div className="p-4 sm:p-6 max-w-7xl mx-auto space-y-5">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h1 className="text-xl font-bold text-slate-900">Tables, areas &amp; QR codes</h1>
-          <p className="text-xs text-slate-500">
-            Print table QR tents for self-ordering and Counter QR for quick queues
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={() => setExternalMode('qr')}
-            className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50"
-          >
-            Preview Guest QR (/qr)
-          </button>
-          <button
-            type="button"
-            onClick={() => window.print()}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-800 px-3.5 py-2 text-xs font-semibold text-white hover:bg-emerald-900"
-          >
-            <Printer className="h-3.5 w-3.5" /> Print All Table QRs
-          </button>
-        </div>
-      </div>
-
-      <form
-        onSubmit={handleAddTable}
-        className="no-print rounded-xl border border-slate-200 bg-white p-4 flex flex-wrap items-end gap-3 text-xs"
-      >
-        <div>
-          <label className="block font-semibold text-slate-700 mb-1">Table Name</label>
-          <input
-            required
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="e.g. T09"
-            className="rounded-lg border border-slate-300 px-3 py-1.5"
-          />
-        </div>
-        <div>
-          <label className="block font-semibold text-slate-700 mb-1">Area</label>
-          <select
-            aria-label="Table area"
-            value={area}
-            onChange={(e) => setArea(e.target.value as PosTable['area'])}
-            className="rounded-lg border border-slate-300 px-3 py-1.5"
-          >
-            <option value="Indoor">Indoor</option>
-            <option value="Garden">Garden</option>
-            <option value="Bar counter">Bar counter</option>
-            <option value="Take-away">Take-away</option>
-          </select>
-        </div>
-        <div>
-          <label className="block font-semibold text-slate-700 mb-1">Seats</label>
-          <input
-            type="number"
-            min={1}
-            value={seats}
-            onChange={(e) => setSeats(e.target.value)}
-            className="w-20 rounded-lg border border-slate-300 px-3 py-1.5 tabular-nums"
-          />
-        </div>
-        <button
-          type="submit"
-          className="inline-flex items-center gap-1 rounded-lg bg-emerald-800 px-4 py-1.5 font-semibold text-white"
-        >
-          <Plus className="h-3.5 w-3.5" /> {editingTableId ? 'Save Changes' : 'Add Table'}
-        </button>
-        {editingTableId && (
-          <button
-            type="button"
-            onClick={() => {
-              setEditingTableId(null);
-              setName('');
-              setSeats('4');
-            }}
-            className="rounded-lg border border-slate-300 px-3 py-1.5 font-semibold text-slate-600 hover:bg-slate-50"
-          >
-            Cancel
-          </button>
-        )}
-      </form>
-
-      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-        <div className="rounded-xl border border-emerald-200 bg-emerald-50/40 p-4 flex flex-col items-center text-center">
-          <div className="text-xs font-bold text-emerald-950 mb-2">Counter Self-Order QR</div>
-          <QrCodeBox value={`${window.location.origin}/?mode=qr&table=Counter`} size={112} />
-          <div className="mt-2 text-[11px] text-emerald-800">Scan at counter to skip the line</div>
-        </div>
-
-        {tables.map((t) => (
-          <div
-            key={t.id}
-            className="rounded-xl border border-slate-200 bg-white p-4 flex flex-col items-center text-center"
-          >
-            <div className="w-full flex items-center justify-between mb-2">
-              <span className="inline-flex items-center gap-1 text-xs font-bold text-slate-900">
-                <Grid2x2 className="h-3.5 w-3.5 text-emerald-800" />
-                {t.name}
-              </span>
-              <span className="text-[11px] text-slate-500">
-                {t.area} · {t.seats} seats
-              </span>
-            </div>
-            <QrCodeBox
-              value={`${window.location.origin}/?mode=qr&table=${encodeURIComponent(t.name)}`}
-              size={112}
-            />
-            <div className="no-print mt-2.5 w-full flex items-center justify-between text-[11px]">
-              <span className="capitalize text-slate-500">{t.status}</span>
-              <div className="inline-flex items-center gap-2.5">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setEditingTableId(t.id);
-                    setName(t.name);
-                    setArea(t.area);
-                    setSeats(String(t.seats));
-                  }}
-                  className="text-emerald-800 font-semibold hover:underline inline-flex items-center gap-0.5"
-                >
-                  <Pencil className="h-3 w-3" /> Edit
-                </button>
-                <button
-                  type="button"
-                  onClick={() => deleteTable(t.id)}
-                  className="text-red-600 hover:underline inline-flex items-center gap-0.5"
-                >
-                  <Trash2 className="h-3 w-3" /> Remove
-                </button>
-              </div>
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
+  return <TablesFloorPlanWorkspace />;
 }
 
 export function StaffView() {
@@ -2193,6 +2037,8 @@ export function PlanBillingView() {
   );
 }
 
+type SettingsTab = 'general' | 'telegram' | 'ai' | 'invoice' | 'khqr';
+
 export function SettingsView() {
   const {
     state,
@@ -2210,6 +2056,7 @@ export function SettingsView() {
   } = usePos();
   const isAdminActor = canManageOwnerGrants(activeStaff);
   const canEdit = canEditSettings(activeStaff, state.ownerPermissions);
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>('general');
   const [targetTenantId, setTargetTenantId] = useState<string>(activeTenantId);
   const [verifyingKhqr, setVerifyingKhqr] = useState(false);
   const [khqrVerifyStatus, setKhqrVerifyStatus] = useState<{ ok: boolean; msg: string } | null>(null);
@@ -2565,7 +2412,57 @@ export function SettingsView() {
         </span>
       </div>
 
+      {/* Settings Section Tabs */}
+      <div
+        data-testid="settings-tabs"
+        role="tablist"
+        aria-label="Branch settings categories"
+        className="flex flex-wrap items-center gap-1.5 rounded-xl border border-slate-200 bg-white p-1.5 text-xs"
+      >
+        {(
+          [
+            ['general', 'General & Tax'],
+            ['telegram', 'Telegram Bot'],
+            ['ai', 'AI & Automation'],
+            ['invoice', 'Invoice & Receipt'],
+            ['khqr', 'Bakong KHQR'],
+          ] as [SettingsTab, string][]
+        ).map(([tabId, label]) => (
+          <button
+            key={tabId}
+            type="button"
+            role="tab"
+            data-testid={`settings-tab-${tabId}`}
+            aria-selected={settingsTab === tabId}
+            onClick={() => setSettingsTab(tabId)}
+            className={`rounded-lg px-3.5 py-2 font-semibold whitespace-nowrap transition-colors ${
+              settingsTab === tabId
+                ? 'bg-emerald-800 text-white'
+                : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {settingsTab === 'telegram' && (
+        <TelegramBotSettingsPanel
+          branch={effectiveBranch}
+          shopName={effectiveTenantState.shopName}
+          applyBranchPartial={applyBranchPartial}
+        />
+      )}
+
+      {settingsTab === 'ai' && (
+        <AiCapabilitiesSettingsPanel
+          branch={effectiveBranch}
+          applyBranchPartial={applyBranchPartial}
+        />
+      )}
+
       {/* Simple Mode vs Full Mode */}
+      {settingsTab === 'general' && (
       <div className="rounded-xl border border-slate-200 bg-white p-4 flex flex-wrap items-center justify-between gap-3">
         <div>
           <h2 className="text-sm font-bold text-slate-900">Simple mode (counter / takeaway)</h2>
@@ -2584,8 +2481,10 @@ export function SettingsView() {
           <span>{effectiveBranch.simpleMode ? 'Simple Mode On' : 'Full Mode Active'}</span>
         </label>
       </div>
+      )}
 
       {/* Invoice & Receipt Template Configurator */}
+      {settingsTab === 'invoice' && (
       <div className="rounded-xl border border-slate-200 bg-white p-4 space-y-4 text-xs">
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-3">
           <div>
@@ -3004,8 +2903,10 @@ export function SettingsView() {
           </div>
         </div>
       </div>
+      )}
 
       {/* Bakong KHQR Merchant Setup */}
+      {settingsTab === 'khqr' && (
       <div className="rounded-xl border border-slate-200 bg-white p-4 space-y-3 text-xs">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex flex-wrap items-center gap-2">
@@ -3143,8 +3044,11 @@ export function SettingsView() {
           </div>
         )}
       </div>
+      )}
 
       {/* Currency & Tax */}
+      {settingsTab === 'general' && (
+      <>
       <div className="rounded-xl border border-slate-200 bg-white p-4 space-y-3">
         <h2 className="text-sm font-bold text-slate-900">Currency, rounding &amp; Cambodia VAT</h2>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
@@ -3244,6 +3148,8 @@ export function SettingsView() {
           </label>
         </div>
       </div>
+      </>
+      )}
     </div>
   );
 }

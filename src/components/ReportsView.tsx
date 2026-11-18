@@ -1,10 +1,11 @@
 import React, { useMemo, useState } from 'react';
-import { BarChart3, Sparkles, Calendar, Send, Clock, Receipt } from 'lucide-react';
+import { Sparkles, Calendar, Send, Clock, Receipt } from 'lucide-react';
 import { usePos } from '../context/PosContext';
 import { roundCurrency, usdToKhr } from '../utils/posMath';
 import { summarizeLoyaltyProgram } from '../utils/loyaltyQr';
 import { summarizeLoyaltyExpiry, EXPIRY_WARNING_WINDOW_DAYS } from '../utils/loyaltyExpiry';
 import { AiForecastWidget } from './AiForecastWidget';
+import { ReportsSalesTrendChart } from './ReportsSalesTrendChart';
 
 type ReportTab =
   | 'overview'
@@ -30,7 +31,8 @@ export function ReportsView() {
   const [aiLoading, setAiLoading] = useState(false);
 
   // Telegram test send
-  const [telegramSent, setTelegramSent] = useState(false);
+  const [telegramSending, setTelegramSending] = useState(false);
+  const [telegramResult, setTelegramResult] = useState<{ ok: boolean; msg: string } | null>(null);
 
   const paidOrders = useMemo(
     () => state.orders.filter((o) => o.branchId === activeBranch.id && o.status === 'paid'),
@@ -125,9 +127,9 @@ export function ReportsView() {
     return { openPoCount: openPos.length, openApUsd, lowStock, waste7dUsd };
   }, [state.purchaseOrders, state.stockHistory, branchIngredients, activeBranch.id]);
 
-  const maxDailyRev = Math.max(
-    1,
-    ...state.dailyRevenueHistory.map((d) => d.netSalesUsd)
+  const recent7Days = useMemo(
+    () => state.dailyRevenueHistory.slice(-7),
+    [state.dailyRevenueHistory]
   );
 
   const forecastRows = useMemo(() => {
@@ -253,11 +255,11 @@ export function ReportsView() {
               <div className="mt-1 text-2xl font-bold text-slate-900 tabular-nums">
                 $
                 {roundCurrency(
-                  state.dailyRevenueHistory.reduce((s, d) => s + d.netSalesUsd, 0)
+                  recent7Days.reduce((s, d) => s + d.netSalesUsd, 0)
                 ).toFixed(2)}
               </div>
               <div className="text-xs text-slate-500 tabular-nums">
-                {state.dailyRevenueHistory.reduce((s, d) => s + d.bills, 0)} total bills
+                {recent7Days.reduce((s, d) => s + d.bills, 0)} total bills
               </div>
             </div>
             <div className="rounded-xl border border-slate-200 bg-white p-4">
@@ -278,63 +280,10 @@ export function ReportsView() {
             </div>
           </div>
 
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-            {/* SVG 7-Day Bar Chart */}
-            <div className="lg:col-span-2 rounded-xl border border-slate-200 bg-white p-4">
-              <div className="flex items-center justify-between mb-4">
-                <h2 className="text-sm font-bold text-slate-900 flex items-center gap-2">
-                  <BarChart3 className="h-4 w-4 text-emerald-800" />
-                  Daily net sales (USD)
-                </h2>
-                <span className="text-xs text-slate-500">Last 7 days</span>
-              </div>
-              <div className="w-full overflow-x-auto">
-                <svg
-                  viewBox="0 0 640 220"
-                  className="w-full h-56"
-                  role="img"
-                  aria-label="Daily net sales bar chart"
-                >
-                  {state.dailyRevenueHistory.map((d, idx) => {
-                    const barW = 54;
-                    const gap = (640 - state.dailyRevenueHistory.length * barW) / (state.dailyRevenueHistory.length + 1);
-                    const x = gap + idx * (barW + gap);
-                    const barH = Math.max(8, Math.round((d.netSalesUsd / maxDailyRev) * 145));
-                    const y = 175 - barH;
-                    return (
-                      <g key={d.date}>
-                        <rect
-                          x={x}
-                          y={y}
-                          width={barW}
-                          height={barH}
-                          rx={6}
-                          fill={idx === state.dailyRevenueHistory.length - 1 ? '#065F46' : '#10B981'}
-                        />
-                        <text
-                          x={x + barW / 2}
-                          y={y - 6}
-                          textAnchor="middle"
-                          fontSize="11"
-                          fontWeight="600"
-                          fill="#0F172A"
-                        >
-                          ${Math.round(d.netSalesUsd)}
-                        </text>
-                        <text
-                          x={x + barW / 2}
-                          y={196}
-                          textAnchor="middle"
-                          fontSize="10"
-                          fill="#64748B"
-                        >
-                          {d.date.slice(5)}
-                        </text>
-                      </g>
-                    );
-                  })}
-                </svg>
-              </div>
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-start">
+            {/* Recharts 30-Day Line Chart + Peak Business Hours */}
+            <div className="lg:col-span-2">
+              <ReportsSalesTrendChart />
             </div>
 
             {/* Category & Best Sellers */}
@@ -556,24 +505,61 @@ export function ReportsView() {
 
       {tab === 'telegram' && (
         <div className="rounded-xl border border-slate-200 bg-white p-5 max-w-xl space-y-4">
-          <h2 className="text-sm font-bold text-slate-900">End-of-day Telegram summary</h2>
-          <div className="rounded-lg border border-slate-200 bg-slate-50 p-4 font-mono text-xs whitespace-pre-line text-slate-800">
-            {`[${activeBranch.name}] Daily Close Summary\nPaid Bills: ${paidOrders.length}\nRevenue: $${todayTotalUsd.toFixed(2)} (${usdToKhr(todayTotalUsd, activeBranch.exchangeRate, activeBranch.rielRounding).toLocaleString()} ៛)\nTop Seller: ${topItems[0]?.name || 'N/A'}\nChannel: ${activeBranch.telegramChannel}`}
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h2 className="text-sm font-bold text-slate-900">End-of-day Telegram summary</h2>
+            <span className="text-xs text-slate-500 font-mono">
+              {activeBranch.telegramBotHandle || '@StorePosBot'} · {activeBranch.telegramScheduleTime || '22:30'}
+            </span>
           </div>
-          <div className="flex items-center justify-between">
-            {telegramSent ? (
-              <span className="text-xs font-semibold text-emerald-700">
-                Sent to {activeBranch.telegramChannel}.
+          <div className="rounded-lg border border-slate-200 bg-slate-50 p-4 font-mono text-xs whitespace-pre-line text-slate-800">
+            {`[${activeBranch.name}] Daily Close Summary\nPaid Bills: ${paidOrders.length}\nRevenue: $${todayTotalUsd.toFixed(2)} (${usdToKhr(todayTotalUsd, activeBranch.exchangeRate, activeBranch.rielRounding).toLocaleString()} ៛)\nTop Seller: ${topItems[0]?.name || 'N/A'}\nChannel: ${activeBranch.telegramChannel || 'Not configured'}`}
+          </div>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            {telegramResult ? (
+              <span
+                className={`text-xs font-semibold ${
+                  telegramResult.ok ? 'text-emerald-700' : 'text-red-700'
+                }`}
+              >
+                {telegramResult.msg}
               </span>
             ) : (
-              <span className="text-xs text-slate-500">Scheduled nightly at 22:30</span>
+              <span className="text-xs text-slate-500">
+                Scheduled nightly at {activeBranch.telegramScheduleTime || '22:30'}
+              </span>
             )}
             <button
               type="button"
-              onClick={() => setTelegramSent(true)}
-              className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-800 px-4 py-2 text-xs font-semibold text-white hover:bg-emerald-900"
+              disabled={telegramSending}
+              onClick={async () => {
+                setTelegramSending(true);
+                setTelegramResult(null);
+                const msgText = `[${activeBranch.name}] Daily Close Summary\nPaid Bills: ${paidOrders.length}\nRevenue: $${todayTotalUsd.toFixed(2)} (${usdToKhr(todayTotalUsd, activeBranch.exchangeRate, activeBranch.rielRounding).toLocaleString()} ៛)\nTop Seller: ${topItems[0]?.name || 'N/A'}`;
+                try {
+                  const res = await fetch('/api/telegram/send', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                      channel: activeBranch.telegramChannel,
+                      botHandle: activeBranch.telegramBotHandle,
+                      branchName: activeBranch.name,
+                      message: msgText,
+                    }),
+                  });
+                  const data = (await res.json()) as { ok?: boolean; notice?: string; error?: string };
+                  setTelegramResult({
+                    ok: Boolean(res.ok && data.ok),
+                    msg: data.notice || data.error || 'Dispatch complete.',
+                  });
+                } catch {
+                  setTelegramResult({ ok: false, msg: 'Unable to reach /api/telegram/send.' });
+                } finally {
+                  setTelegramSending(false);
+                }
+              }}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-800 px-4 py-2 text-xs font-semibold text-white hover:bg-emerald-900 disabled:opacity-60"
             >
-              <Send className="h-3.5 w-3.5" /> Send Telegram Report Now
+              <Send className="h-3.5 w-3.5" /> {telegramSending ? 'Sending...' : 'Send Telegram Report Now'}
             </button>
           </div>
         </div>
